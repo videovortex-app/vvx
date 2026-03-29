@@ -1,0 +1,26 @@
+name: CI
+
+on:
+  push:
+    branches: [ "main" ]
+  pull_request:
+    branches: [ "main" ]
+
+jobs:
+  build-and-test:
+    runs-on: ubuntu-latest
+    container: swift:6.0-jammy
+
+    steps:
+    - uses: actions/checkout@v4
+
+    - name: Install System Dependencies
+      run: |
+        apt-get update
+        apt-get install -y libsqlite3-dev pkg-config ffmpeg
+
+    - name: Build
+      run: swift build -c release
+
+    - name: Run Tests
+      run: swift test

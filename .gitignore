@@ -1,0 +1,25 @@
+# Swift build artifacts
+.build/
+.build-linux/
+*.o
+*.d
+
+# Xcode user state (never commit user-specific IDE files)
+xcuserdata/
+*.xcuserstate
+.swiftpm/xcode/
+
+# Cursor project settings (local-only)
+.cursor/
+.cursorrules
+
+# Old nested package directory (contents hoisted to repo root).
+# Leading slash anchors to repo root so Sources/VideoVortexCore/ is NOT ignored.
+/VideoVortexCore/
+
+# macOS
+.DS_Store
+
+# Private docs
+Docs/
+.aider*
