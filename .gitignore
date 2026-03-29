@@ -20,6 +20,11 @@ xcuserdata/
 # macOS
 .DS_Store
 
+# Local gather Step 4 smoke output (RapidTesting / DockerTesting pinned folders)
+/gather-step4-smoke/
+/gather-step4-smoke-linux/
+/gather-step4-smoke-linux-zoo/
+
 # Private docs
 Docs/
 .aider*

@@ -29,28 +29,60 @@ public enum FFmpegRunner {
         case outputRenameFailed
     }
 
+    /// Compute padded clip bounds from logical start/end — the **single source of truth** for
+    /// `--pad` math used by `clip(...)`, `GatherCommand`, and dry-run planning.
+    ///
+    /// - Parameters:
+    ///   - logicalStart:   Logical clip start in seconds (L0, after snap/context resolution).
+    ///   - logicalEnd:     Logical clip end in seconds (L1).
+    ///   - pad:            Handle width: seconds subtracted from start and added to end.
+    ///   - videoDuration:  Optional video duration for EOF clamp. When `nil`, the end is
+    ///                     not clamped (ffmpeg stops at EOF for well-formed containers).
+    /// - Returns: `(start, end)` with `start ≥ 0` and `end ≤ videoDuration` when known.
+    public static func paddedBounds(
+        logicalStart: Double,
+        logicalEnd: Double,
+        pad: Double,
+        videoDuration: Double? = nil
+    ) -> (start: Double, end: Double) {
+        let start  = max(0, logicalStart - pad)
+        let rawEnd = logicalEnd + pad
+        let end    = videoDuration.map { min($0, rawEnd) } ?? rawEnd
+        return (start, end)
+    }
+
     /// Extract a clip from a local video file.
     ///
     /// - Parameters:
-    ///   - ffmpegPath: Resolved path to the ffmpeg binary (from `EngineResolver`).
-    ///   - inputPath:  Absolute path to the source video.
-    ///   - start:      Start time in seconds.
-    ///   - end:        End time in seconds (must be > start).
-    ///   - outputPath: Final destination path for the clip.
-    ///   - fast:       When true, uses keyframe seek + stream copy (no re-encode).
+    ///   - ffmpegPath:    Resolved path to the ffmpeg binary (from `EngineResolver`).
+    ///   - inputPath:     Absolute path to the source video.
+    ///   - start:         Logical start time in seconds (L0).
+    ///   - end:           Logical end time in seconds (L1); must be > start.
+    ///   - outputPath:    Final destination path for the clip.
+    ///   - fast:          When true, uses keyframe seek + stream copy (no re-encode).
+    ///   - pad:           Handle width in seconds applied via `paddedBounds`. Default `0`.
+    ///   - videoDuration: Source video duration for EOF clamp when pad > 0. Default `nil`.
     public static func clip(
         ffmpegPath: URL,
         inputPath: String,
         start: Double,
         end: Double,
         outputPath: String,
-        fast: Bool
+        fast: Bool,
+        pad: Double = 0,
+        videoDuration: Double? = nil
     ) async throws -> ClipResult {
         guard FileManager.default.fileExists(atPath: inputPath) else {
             throw ClipError.inputNotFound(path: inputPath)
         }
 
-        let duration = end - start
+        let (actualStart, actualEnd) = paddedBounds(
+            logicalStart: start,
+            logicalEnd: end,
+            pad: pad,
+            videoDuration: videoDuration
+        )
+        let duration = actualEnd - actualStart
         let tmpPath  = Self.atomicTempPath(forFinalOutput: outputPath)
 
         defer { try? FileManager.default.removeItem(atPath: tmpPath) }
@@ -58,12 +90,12 @@ public enum FFmpegRunner {
         if fast {
             try await runFFmpeg(
                 ffmpegPath: ffmpegPath,
-                args: fastArgs(input: inputPath, start: start, duration: duration, output: tmpPath)
+                args: fastArgs(input: inputPath, start: actualStart, duration: duration, output: tmpPath)
             )
             try atomicRename(from: tmpPath, to: outputPath)
             return ClipResult(
                 inputPath: inputPath, outputPath: outputPath,
-                startSeconds: start, endSeconds: end, durationSeconds: duration,
+                startSeconds: actualStart, endSeconds: actualEnd, durationSeconds: duration,
                 method: "copy", completedAt: Date()
             )
         }
@@ -74,14 +106,14 @@ public enum FFmpegRunner {
             try await runFFmpeg(
                 ffmpegPath: ffmpegPath,
                 args: accurateArgs(
-                    input: inputPath, start: start, duration: duration,
+                    input: inputPath, start: actualStart, duration: duration,
                     output: tmpPath, encoder: "h264_videotoolbox", extraFlags: ["-b:v", "5M"]
                 )
             )
             try atomicRename(from: tmpPath, to: outputPath)
             return ClipResult(
                 inputPath: inputPath, outputPath: outputPath,
-                startSeconds: start, endSeconds: end, durationSeconds: duration,
+                startSeconds: actualStart, endSeconds: actualEnd, durationSeconds: duration,
                 method: "videotoolbox", completedAt: Date()
             )
         } catch {
@@ -92,14 +124,14 @@ public enum FFmpegRunner {
         try await runFFmpeg(
             ffmpegPath: ffmpegPath,
             args: accurateArgs(
-                input: inputPath, start: start, duration: duration,
+                input: inputPath, start: actualStart, duration: duration,
                 output: tmpPath, encoder: "libx264", extraFlags: ["-preset", "fast"]
             )
         )
         try atomicRename(from: tmpPath, to: outputPath)
         return ClipResult(
             inputPath: inputPath, outputPath: outputPath,
-            startSeconds: start, endSeconds: end, durationSeconds: duration,
+            startSeconds: actualStart, endSeconds: actualEnd, durationSeconds: duration,
             method: "libx264", completedAt: Date()
         )
     }

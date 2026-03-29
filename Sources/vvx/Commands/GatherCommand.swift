@@ -15,7 +15,8 @@ enum SnapMode: String, ExpressibleByArgument, CaseIterable {
 /// Resolved clip window computed once per hit, used by dry-run, NDJSON, stderr, and ffmpeg.
 private struct GatherResolvedClip: Sendable {
     let hit: SearchHit
-    /// Final start/end passed to ffmpeg (and emitted in NDJSON).
+    /// Final logical start/end from Step 3 snap/context resolution.
+    /// Step 4 pad is applied on top of these by FFmpegRunner.paddedBounds.
     let resolvedStartSeconds: Double
     let resolvedEndSeconds: Double
     /// Actual snap mode applied (may differ from requested if fallback occurred).
@@ -43,6 +44,10 @@ private struct GatherClipSuccess: Encodable {
     let durationSeconds: Double
     let resolvedStartSeconds: Double
     let resolvedEndSeconds: Double
+    let padSeconds: Double
+    let paddedStartSeconds: Double
+    let paddedEndSeconds: Double
+    let plannedSrtPath: String?
     let matchedText: String
     let method: String
     let sizeBytes: Int64?
@@ -69,7 +74,11 @@ private struct GatherDryRunEntry: Encodable {
     let endTime: String
     let resolvedStartSeconds: Double
     let resolvedEndSeconds: Double
+    let padSeconds: Double
+    let paddedStartSeconds: Double
+    let paddedEndSeconds: Double
     let plannedDurationSeconds: Double
+    let plannedSrtPath: String
     let matchedText: String
     let snapApplied: String
 }
@@ -119,14 +128,15 @@ private enum GatherWorkerOutcome: Sendable {
 
 // MARK: - Command
 
-/// Phase 3.5 Step 3: search, smart boundaries (--snap, --context-seconds), budget cap, SQL engagement filter.
+/// Phase 3.5 Step 4: editor sidecars (--pad, re-timed SRT, manifest.json, clips.md).
 struct GatherCommand: AsyncParsableCommand {
     static let configuration = CommandConfiguration(
         commandName: "gather",
         abstract: "Search your archive and extract matching clips as a batch. (Pro feature)",
         discussion: """
         Searches vortex.db for the query and extracts every matching transcript segment
-        as a frame-accurate MP4 clip into an organized output folder.
+        as a frame-accurate MP4 clip into an organized output folder, accompanied by
+        re-timed SRT subtitles, manifest.json, and clips.md.
 
         Clip window flags:
           --context-seconds N  Adds N seconds before/after each matched cue (default: 1.0,
@@ -135,6 +145,8 @@ struct GatherCommand: AsyncParsableCommand {
           --snap block         Exact cue bounds only; ignores --context-seconds.
           --snap chapter       Full chapter span containing the hit; ignores --context-seconds.
                                Falls back to block if chapter_index is missing (run vvx reindex).
+          --pad N              Seconds of handle before/after logical in/out for NLE cross-dissolves
+                               (default: 2.0). Applied by FFmpegRunner after snap/context resolution.
 
         Examples:
           vvx gather "artificial general intelligence" --limit 10
@@ -144,6 +156,7 @@ struct GatherCommand: AsyncParsableCommand {
           vvx gather "Tesla" --min-views 1000000 --dry-run
           vvx gather "AGI" --limit 5 --fast -o ~/Desktop/agi-clips
           vvx gather "news" --max-total-duration 600
+          vvx gather "neuralink" --pad 0      # tight cuts, no handles
         """
     )
 
@@ -185,6 +198,11 @@ struct GatherCommand: AsyncParsableCommand {
 
     @Option(name: .long, help: "Hard cap on total resolved clip duration in seconds. Drops lower-relevance clips first.")
     var maxTotalDuration: Double?
+
+    // MARK: - Pad flag (Step 4)
+
+    @Option(name: .long, help: "Seconds of handle before and after each clip's logical in/out for NLE cross-dissolves; padded start is clamped at zero (default: 2.0).")
+    var pad: Double = 2.0
 
     // MARK: - Extraction flags
 
@@ -300,9 +318,9 @@ struct GatherCommand: AsyncParsableCommand {
 
         for bs in budgetSkipped {
             printNDJSON(GatherBudgetSkipEntry(
-                videoId:              bs.hit.videoId,
-                startTime:            bs.hit.startTime,
-                endTime:              bs.hit.endTime,
+                videoId:                bs.hit.videoId,
+                startTime:              bs.hit.startTime,
+                endTime:                bs.hit.endTime,
                 plannedDurationSeconds: bs.plannedDuration
             ))
         }
@@ -326,10 +344,20 @@ struct GatherCommand: AsyncParsableCommand {
         // 10 — Build clip plans.
         let plans = buildClipPlans(resolved: budgetClippable, outputDir: outputDir)
 
-        // 11 — Dry-run branch.
+        // 11 — Capture pad locally for use in TaskGroup and closures.
+        let padValue = pad
+
+        // 12 — Dry-run branch.
         if dryRun {
             for plan in plans {
-                let rc = plan.resolved
+                let rc      = plan.resolved
+                let padded  = FFmpegRunner.paddedBounds(
+                    logicalStart:  rc.resolvedStartSeconds,
+                    logicalEnd:    rc.resolvedEndSeconds,
+                    pad:           padValue,
+                    videoDuration: rc.hit.videoDurationSeconds.map { Double($0) }
+                )
+                let srtPlan = (plan.outputPath as NSString).deletingPathExtension + ".srt"
                 printNDJSON(GatherDryRunEntry(
                     plannedOutputPath:      plan.outputPath,
                     inputPath:              rc.hit.videoPath ?? "",
@@ -340,7 +368,11 @@ struct GatherCommand: AsyncParsableCommand {
                     endTime:                TimeParser.formatHHMMSS(rc.resolvedEndSeconds),
                     resolvedStartSeconds:   rc.resolvedStartSeconds,
                     resolvedEndSeconds:     rc.resolvedEndSeconds,
-                    plannedDurationSeconds: rc.plannedDuration,
+                    padSeconds:             padValue,
+                    paddedStartSeconds:     padded.start,
+                    paddedEndSeconds:       padded.end,
+                    plannedDurationSeconds: padded.end - padded.start,
+                    plannedSrtPath:         srtPlan,
                     matchedText:            String(rc.hit.text.prefix(200)),
                     snapApplied:            rc.snapApplied.rawValue
                 ))
@@ -349,16 +381,17 @@ struct GatherCommand: AsyncParsableCommand {
             return
         }
 
-        // 12 — Extraction loop (max 4 concurrent, parent-only printing).
+        // 13 — Extraction loop (max 4 concurrent, parent-only printing).
         let displayDir = outputDir.replacingOccurrences(of: NSHomeDirectory(), with: "~")
         stderrLine("Extracting \(plans.count) clip(s) → \(displayDir)")
 
         let resolvedFfmpeg = ffmpegURL!
-        let useFast = fast
-        var succeeded = 0
-        var failed = 0
-        var completed = 0
-        let totalPlans = plans.count
+        let useFast        = fast
+        var succeeded      = 0
+        var failed         = 0
+        var completed      = 0
+        let totalPlans     = plans.count
+        var successPayloads: [GatherWorkerOutcome.SuccessPayload] = []
 
         await withTaskGroup(of: GatherWorkerOutcome.self) { group in
             var active = 0
@@ -368,14 +401,21 @@ struct GatherCommand: AsyncParsableCommand {
                     if let outcome = await group.next() {
                         completed += 1
                         emitOutcome(outcome, completed: completed, total: totalPlans,
-                                    succeeded: &succeeded, failed: &failed)
+                                    succeeded: &succeeded, failed: &failed,
+                                    pad: padValue)
+                        if case .success(let p) = outcome { successPayloads.append(p) }
                     }
                     active -= 1
                 }
 
                 let captured = plan
                 group.addTask {
-                    return await Self.extractClip(plan: captured, ffmpegPath: resolvedFfmpeg, fast: useFast)
+                    return await Self.extractClip(
+                        plan: captured,
+                        ffmpegPath: resolvedFfmpeg,
+                        fast: useFast,
+                        pad: padValue
+                    )
                 }
                 active += 1
             }
@@ -383,14 +423,142 @@ struct GatherCommand: AsyncParsableCommand {
             for await outcome in group {
                 completed += 1
                 emitOutcome(outcome, completed: completed, total: totalPlans,
-                            succeeded: &succeeded, failed: &failed)
+                            succeeded: &succeeded, failed: &failed,
+                            pad: padValue)
+                if case .success(let p) = outcome { successPayloads.append(p) }
             }
         }
 
         stderrLine("Done. \(succeeded)/\(totalPlans) clip(s) extracted\(failed > 0 ? ", \(failed) failed" : "").")
 
+        // 14 — Write sidecars for all successful clips.
+        if !successPayloads.isEmpty {
+            successPayloads.sort { $0.plan.index < $1.plan.index }
+            await writeSidecars(
+                successPayloads: successPayloads,
+                db:              db,
+                outputDir:       outputDir,
+                padValue:        padValue
+            )
+        }
+
         if failed > 0 {
             throw ExitCode(1)
+        }
+    }
+
+    // MARK: - Sidecar writing (post-extraction, sequential)
+
+    private func writeSidecars(
+        successPayloads: [GatherWorkerOutcome.SuccessPayload],
+        db: VortexDB,
+        outputDir: String,
+        padValue: Double
+    ) async {
+        var manifestClips: [GatherManifestClip] = []
+        var padClampedCount = 0
+
+        for p in successPayloads {
+            let rc          = p.plan.resolved
+            let hit         = rc.hit
+            let paddedStart = p.clipResult.startSeconds
+            let paddedEnd   = p.clipResult.endSeconds
+
+            // Count how many clips had their start clamped by pad (would have gone < 0).
+            if rc.resolvedStartSeconds - padValue < -0.001 { padClampedCount += 1 }
+
+            // Fetch transcript blocks for this video and write re-timed SRT.
+            let blocks = (try? await db.blocksForVideo(videoId: hit.videoId)) ?? []
+            let srtPathAbs: String?
+            let transcriptSource: String
+
+            if blocks.isEmpty {
+                srtPathAbs       = nil
+                transcriptSource = "none"
+            } else if let srtContent = SRTRetimer.retimed(
+                blocks: blocks, paddedStart: paddedStart, paddedEnd: paddedEnd
+            ) {
+                let srtPath = (p.plan.outputPath as NSString).deletingPathExtension + ".srt"
+                do {
+                    try srtContent.write(toFile: srtPath, atomically: true, encoding: .utf8)
+                    srtPathAbs = srtPath
+                } catch {
+                    stderrLine("⚠ Could not write SRT for \(hit.videoId): \(error.localizedDescription)")
+                    srtPathAbs = nil
+                }
+                transcriptSource = "local"
+            } else {
+                // retimed() returned nil — no blocks overlap the padded window.
+                srtPathAbs       = nil
+                transcriptSource = "local"
+            }
+
+            // Relative paths for manifest (folder can be zipped/moved).
+            let mp4Filename = URL(fileURLWithPath: p.plan.outputPath).lastPathComponent
+            let srtFilename = srtPathAbs.map { URL(fileURLWithPath: $0).lastPathComponent }
+
+            // Shell-safe reproduce command (copy-paste ready).
+            let srcPath      = hit.videoPath ?? "UNKNOWN_PATH"
+            let reproducCmd  = "vvx clip \"\(srcPath)\" --start \(rc.resolvedStartSeconds) --end \(rc.resolvedEndSeconds) --pad \(padValue)"
+
+            // Engagement snapshot — omit object when all fields nil.
+            let engagement: GatherManifestEngagement?
+            if hit.viewCount != nil || hit.likeCount != nil || hit.commentCount != nil {
+                engagement = GatherManifestEngagement(
+                    viewCount:    hit.viewCount,
+                    likeCount:    hit.likeCount,
+                    commentCount: hit.commentCount
+                )
+            } else {
+                engagement = nil
+            }
+
+            // Chapter info (if present on this hit).
+            let chapter: GatherManifestChapter? = hit.chapterIndex.flatMap { idx in
+                guard idx >= 0, idx < hit.chapters.count else { return nil }
+                return GatherManifestChapter(title: hit.chapters[idx].title, index: idx)
+            }
+
+            let indexStr = GatherPathNaming.paddedClipIndex(p.plan.index, total: p.plan.total)
+            manifestClips.append(GatherManifestClip(
+                id:                   indexStr,
+                videoId:              hit.videoId,
+                sourceUrl:            hit.videoId,   // videos.id IS the canonical URL
+                title:                hit.title,
+                uploader:             hit.uploader,
+                mp4Path:              "./\(mp4Filename)",
+                srtPath:              srtFilename.map { "./\($0)" },
+                transcriptSource:     transcriptSource,
+                logicalStartSeconds:  rc.resolvedStartSeconds,
+                logicalEndSeconds:    rc.resolvedEndSeconds,
+                padSeconds:           padValue,
+                paddedStartSeconds:   paddedStart,
+                paddedEndSeconds:     paddedEnd,
+                engagement:           engagement,
+                chapter:              chapter,
+                reproduceCommand:     reproducCmd,
+                srtCuesTrimmed:       false
+            ))
+        }
+
+        // Write manifest.json + clips.md.
+        do {
+            try GatherSidecarWriter.write(
+                clips:      manifestClips,
+                query:      query,
+                padSeconds: padValue,
+                outputDir:  outputDir
+            )
+        } catch {
+            stderrLine("⚠ Could not write manifest/clips.md: \(error.localizedDescription)")
+        }
+
+        // Single-line stderr pad summary.
+        if padValue > 0 {
+            let clampNote = padClampedCount > 0
+                ? " (start clamped at 0 on \(padClampedCount) clip(s))"
+                : ""
+            stderrLine("Pad: \(String(format: "%g", padValue)) s handles applied for NLE crossfades\(clampNote).")
         }
     }
 
@@ -550,19 +718,22 @@ struct GatherCommand: AsyncParsableCommand {
     private static func extractClip(
         plan: GatherClipPlan,
         ffmpegPath: URL,
-        fast: Bool
+        fast: Bool,
+        pad: Double
     ) async -> GatherWorkerOutcome {
         let wallStart = Date()
         let rc = plan.resolved
 
         do {
             let result = try await FFmpegRunner.clip(
-                ffmpegPath: ffmpegPath,
-                inputPath:  rc.hit.videoPath!,
-                start:      rc.resolvedStartSeconds,
-                end:        rc.resolvedEndSeconds,
-                outputPath: plan.outputPath,
-                fast:       fast
+                ffmpegPath:    ffmpegPath,
+                inputPath:     rc.hit.videoPath!,
+                start:         rc.resolvedStartSeconds,
+                end:           rc.resolvedEndSeconds,
+                outputPath:    plan.outputPath,
+                fast:          fast,
+                pad:           pad,
+                videoDuration: rc.hit.videoDurationSeconds.map { Double($0) }
             )
             let elapsed = Date().timeIntervalSince(wallStart)
             let size = try? FileManager.default.attributesOfItem(
@@ -610,7 +781,8 @@ struct GatherCommand: AsyncParsableCommand {
         completed: Int,
         total: Int,
         succeeded: inout Int,
-        failed: inout Int
+        failed: inout Int,
+        pad: Double
     ) {
         switch outcome {
         case .success(let p):
@@ -620,6 +792,7 @@ struct GatherCommand: AsyncParsableCommand {
             let label    = p.plan.resolved.hit.uploader ?? p.plan.resolved.hit.title
             stderrLine("[\(completed)/\(total)] ✓ \(label) — \(startFmt)→\(endFmt) (\(String(format: "%.1f", p.elapsed))s)")
 
+            let srtPlan = (p.plan.outputPath as NSString).deletingPathExtension + ".srt"
             printNDJSON(GatherClipSuccess(
                 outputPath:           p.clipResult.outputPath,
                 inputPath:            p.clipResult.inputPath,
@@ -631,6 +804,10 @@ struct GatherCommand: AsyncParsableCommand {
                 durationSeconds:      p.clipResult.durationSeconds,
                 resolvedStartSeconds: p.plan.resolved.resolvedStartSeconds,
                 resolvedEndSeconds:   p.plan.resolved.resolvedEndSeconds,
+                padSeconds:           pad,
+                paddedStartSeconds:   p.clipResult.startSeconds,
+                paddedEndSeconds:     p.clipResult.endSeconds,
+                plannedSrtPath:       srtPlan,
                 matchedText:          String(p.plan.resolved.hit.text.prefix(200)),
                 method:               p.clipResult.method,
                 sizeBytes:            p.sizeBytes,
