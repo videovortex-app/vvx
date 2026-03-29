@@ -545,4 +545,128 @@ struct VortexDBTests {
         #expect(stored[1].text == "Second block")
         #expect(stored[2].text == "Third block")
     }
+
+    // MARK: - Step 3: SearchHit fields (chapterIndex, videoDurationSeconds)
+
+    @Test("search returns chapterIndex and videoDurationSeconds on hits")
+    func testSearchHitStep3Fields() async throws {
+        let (db, url) = try await makeDB()
+        defer { cleanup(url) }
+
+        let videoId = "https://youtube.com/watch?v=step3fields"
+        try await db.upsertVideo(VideoRecord(
+            id: videoId, title: "Step3 Fields", durationSeconds: 600,
+            sensedAt: "2026-01-01T00:00:00Z"
+        ))
+        let blocks = [SRTBlock(index: 1, startTime: "00:00:01,000", endTime: "00:00:04,000",
+                               startSeconds: 1.0, endSeconds: 4.0, text: "quantum computing is here")]
+        try await db.upsertBlocks(blocks, videoId: videoId, title: "Step3 Fields",
+                                  platform: "YouTube", uploader: nil)
+
+        let hits = try await db.search(query: "quantum computing")
+        #expect(hits.count == 1)
+        // videoDurationSeconds flows from the JOIN.
+        #expect(hits[0].videoDurationSeconds == 600)
+        // chapterIndex is nil for blocks inserted without chapter backfill.
+        #expect(hits[0].chapterIndex == nil)
+    }
+
+    // MARK: - Step 3: engagement filter inside SQL (LIMIT applies after filters)
+
+    @Test("search minViews excludes videos below threshold and respects LIMIT")
+    func testSearchMinViewsInSQL() async throws {
+        let (db, url) = try await makeDB()
+        defer { cleanup(url) }
+
+        // Video A: 500k views (below threshold).
+        let vidA = "https://youtube.com/watch?v=lowviews"
+        try await db.upsertVideo(VideoRecord(
+            id: vidA, title: "Low Views", sensedAt: "2026-01-01T00:00:00Z",
+            viewCount: 500_000
+        ))
+        let blocksA = (1...5).map { i in
+            SRTBlock(index: i,
+                     startTime: "00:00:0\(i),000", endTime: "00:00:0\(i+1),000",
+                     startSeconds: Double(i), endSeconds: Double(i+1),
+                     text: "robots are taking over \(i)")
+        }
+        try await db.upsertBlocks(blocksA, videoId: vidA, title: "Low Views", platform: nil, uploader: nil)
+
+        // Video B: 2M views (above threshold).
+        let vidB = "https://youtube.com/watch?v=highviews"
+        try await db.upsertVideo(VideoRecord(
+            id: vidB, title: "High Views", sensedAt: "2026-01-01T00:00:00Z",
+            viewCount: 2_000_000
+        ))
+        let blocksB = (1...5).map { i in
+            SRTBlock(index: i,
+                     startTime: "00:01:0\(i),000", endTime: "00:01:0\(i+1),000",
+                     startSeconds: Double(60 + i), endSeconds: Double(61 + i),
+                     text: "robots are taking over \(i+10)")
+        }
+        try await db.upsertBlocks(blocksB, videoId: vidB, title: "High Views", platform: nil, uploader: nil)
+
+        // With --limit 10 and --min-views 1_000_000:
+        // Should return only hits from vidB (5 blocks), not the 5 from vidA.
+        let hits = try await db.search(query: "robots", minViews: 1_000_000, limit: 10)
+        #expect(!hits.isEmpty)
+        for h in hits {
+            #expect(h.videoId == vidB)
+        }
+    }
+
+    @Test("search minViews passes NULL view_count rows (conservative)")
+    func testSearchMinViewsPassesNullViewCount() async throws {
+        let (db, url) = try await makeDB()
+        defer { cleanup(url) }
+
+        // Video with no view_count (nil = not scraped).
+        let vidNull = "https://youtube.com/watch?v=nullviews"
+        try await db.upsertVideo(VideoRecord(
+            id: vidNull, title: "Null Views", sensedAt: "2026-01-01T00:00:00Z"
+            // viewCount intentionally omitted (nil)
+        ))
+        let blocks = [SRTBlock(index: 1, startTime: "00:00:01,000", endTime: "00:00:04,000",
+                               startSeconds: 1.0, endSeconds: 4.0, text: "machine learning advances")]
+        try await db.upsertBlocks(blocks, videoId: vidNull, title: "Null Views", platform: nil, uploader: nil)
+
+        // Even with a very high --min-views, null rows must still pass.
+        let hits = try await db.search(query: "machine learning", minViews: 10_000_000)
+        #expect(hits.count == 1)
+        #expect(hits[0].videoId == vidNull)
+    }
+
+    @Test("search minLikes and minComments filter correctly")
+    func testSearchEngagementLikesComments() async throws {
+        let (db, url) = try await makeDB()
+        defer { cleanup(url) }
+
+        let vidGood = "https://youtube.com/watch?v=goodengage"
+        try await db.upsertVideo(VideoRecord(
+            id: vidGood, title: "Good Engage", sensedAt: "2026-01-01T00:00:00Z",
+            likeCount: 10_000, commentCount: 500
+        ))
+        try await db.upsertBlocks(
+            [SRTBlock(index: 1, startTime: "00:00:01,000", endTime: "00:00:04,000",
+                      startSeconds: 1.0, endSeconds: 4.0, text: "space exploration plans")],
+            videoId: vidGood, title: "Good Engage", platform: nil, uploader: nil)
+
+        let vidBad = "https://youtube.com/watch?v=badengage"
+        try await db.upsertVideo(VideoRecord(
+            id: vidBad, title: "Bad Engage", sensedAt: "2026-01-01T00:00:00Z",
+            likeCount: 10, commentCount: 1
+        ))
+        try await db.upsertBlocks(
+            [SRTBlock(index: 1, startTime: "00:00:01,000", endTime: "00:00:04,000",
+                      startSeconds: 1.0, endSeconds: 4.0, text: "space exploration plans")],
+            videoId: vidBad, title: "Bad Engage", platform: nil, uploader: nil)
+
+        let hits = try await db.search(
+            query: "space exploration",
+            minLikes: 1_000,
+            minComments: 100
+        )
+        #expect(hits.count == 1)
+        #expect(hits[0].videoId == vidGood)
+    }
 }
