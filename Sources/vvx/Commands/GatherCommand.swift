@@ -52,6 +52,12 @@ private struct GatherClipSuccess: Encodable {
     let method: String
     let sizeBytes: Int64?
     let snapApplied: String
+    // Step 5 fields
+    let thumbnailPath: String?
+    let embedSourceApplied: Bool
+    let embedSourceNote: String?
+    /// Encode mode: `"copy"` (--fast), `"default"`, or `"exact"` (--exact, libx264 CRF 18).
+    let encodeMode: String
 }
 
 private struct GatherClipFailure: Encodable {
@@ -81,6 +87,11 @@ private struct GatherDryRunEntry: Encodable {
     let plannedSrtPath: String
     let matchedText: String
     let snapApplied: String
+    // Step 5 fields
+    let plannedThumbnailPath: String?
+    let embedSourcePlanned: Bool
+    /// Encode mode that would be used: `"copy"`, `"default"`, or `"exact"`.
+    let encodeMode: String
 }
 
 private struct GatherEmptySummary: Encodable {
@@ -106,6 +117,10 @@ private struct GatherClipPlan: Sendable {
     let outputPath: String
     let index: Int
     let total: Int
+    /// Non-nil when `--embed-source` is on; carries title/artist/comment for this clip.
+    let sourceMetadata: SourceMetadata?
+    /// `true` when `--thumbnails` is on for this run.
+    let extractThumbnail: Bool
 }
 
 private enum GatherWorkerOutcome: Sendable {
@@ -117,6 +132,9 @@ private enum GatherWorkerOutcome: Sendable {
         let clipResult: ClipResult
         let sizeBytes: Int64?
         let elapsed: TimeInterval
+        let thumbnailPath: String?
+        let embedSourceApplied: Bool
+        let encodeMode: String
     }
 
     struct FailurePayload: Sendable {
@@ -215,11 +233,36 @@ struct GatherCommand: AsyncParsableCommand {
     @Flag(name: .long, help: "Fast mode: keyframe seek + stream copy (no re-encode). Instant but ±2-5s drift.")
     var fast: Bool = false
 
+    @Flag(name: .long, help: "Re-encodes the clip using libx264 (CRF 18) to guarantee frame-accurate padding and high quality. Bypasses hardware acceleration. Mutually exclusive with --fast.")
+    var exact: Bool = false
+
+    // MARK: - Step 5 visual + convenience flags
+
+    @Flag(name: .long, help: "Extract one JPEG still per clip at the logical clip start (L0), beside each MP4.")
+    var thumbnails: Bool = false
+
+    @Flag(name: [.customLong("open")], help: "After gather finishes, open the output folder in the system file manager (best-effort; skipped in dry-run).")
+    var openOutput: Bool = false
+
+    @Flag(name: [.customLong("embed-source")], help: "Embed source URL, title, and uploader into MP4 metadata during extraction (standard atoms; format limits apply).")
+    var embedSource: Bool = false
+
     // MARK: - Run
 
     mutating func run() async throws {
         // 1 — Entitlement gate.
         try await EntitlementChecker.requirePro(.gather)
+
+        // 1b — Mutual exclusion: --fast and --exact are semantically opposite.
+        if fast && exact {
+            let env = VvxErrorEnvelope(error: VvxError(
+                code: .parseError,
+                message: "Cannot specify both --fast and --exact.",
+                agentAction: "Use --fast for stream copy (quick, approximate handles) or --exact for re-encoded high-quality handles — not both."
+            ))
+            print(env.jsonString())
+            throw ExitCode(VvxExitCode.forErrorCode(.parseError))
+        }
 
         stderrLine("Searching vortex.db for gather candidates…")
 
@@ -344,8 +387,12 @@ struct GatherCommand: AsyncParsableCommand {
         // 10 — Build clip plans.
         let plans = buildClipPlans(resolved: budgetClippable, outputDir: outputDir)
 
-        // 11 — Capture pad locally for use in TaskGroup and closures.
-        let padValue = pad
+        // 11 — Capture flags locally for use in TaskGroup and closures.
+        let padValue       = pad
+        let useThumbnails  = thumbnails
+        let useEmbedSource = embedSource
+        let useExact       = exact
+        let runEncodeMode  = fast ? "copy" : (exact ? "exact" : "default")
 
         // 12 — Dry-run branch.
         if dryRun {
@@ -357,7 +404,10 @@ struct GatherCommand: AsyncParsableCommand {
                     pad:           padValue,
                     videoDuration: rc.hit.videoDurationSeconds.map { Double($0) }
                 )
-                let srtPlan = (plan.outputPath as NSString).deletingPathExtension + ".srt"
+                let srtPlan   = (plan.outputPath as NSString).deletingPathExtension + ".srt"
+                let thumbPlan = thumbnails
+                    ? ((plan.outputPath as NSString).deletingPathExtension + ".jpg")
+                    : nil
                 printNDJSON(GatherDryRunEntry(
                     plannedOutputPath:      plan.outputPath,
                     inputPath:              rc.hit.videoPath ?? "",
@@ -374,7 +424,10 @@ struct GatherCommand: AsyncParsableCommand {
                     plannedDurationSeconds: padded.end - padded.start,
                     plannedSrtPath:         srtPlan,
                     matchedText:            String(rc.hit.text.prefix(200)),
-                    snapApplied:            rc.snapApplied.rawValue
+                    snapApplied:            rc.snapApplied.rawValue,
+                    plannedThumbnailPath:   thumbPlan,
+                    embedSourcePlanned:     embedSource,
+                    encodeMode:             runEncodeMode
                 ))
             }
             stderrLine("Dry run: \(plans.count) clip(s) planned\(skipNote).")
@@ -387,6 +440,7 @@ struct GatherCommand: AsyncParsableCommand {
 
         let resolvedFfmpeg = ffmpegURL!
         let useFast        = fast
+        let useExactMode   = useExact
         var succeeded      = 0
         var failed         = 0
         var completed      = 0
@@ -414,7 +468,9 @@ struct GatherCommand: AsyncParsableCommand {
                         plan: captured,
                         ffmpegPath: resolvedFfmpeg,
                         fast: useFast,
-                        pad: padValue
+                        exact: useExactMode,
+                        pad: padValue,
+                        thumbnails: useThumbnails
                     )
                 }
                 active += 1
@@ -438,8 +494,24 @@ struct GatherCommand: AsyncParsableCommand {
                 successPayloads: successPayloads,
                 db:              db,
                 outputDir:       outputDir,
-                padValue:        padValue
+                padValue:        padValue,
+                useThumbnails:   useThumbnails,
+                useEmbedSource:  useEmbedSource,
+                encodeMode:      runEncodeMode
             )
+        }
+
+        // 15 — Thumbnail summary.
+        if useThumbnails && !successPayloads.isEmpty {
+            let written = successPayloads.filter { $0.thumbnailPath != nil }.count
+            let failed2 = successPayloads.count - written
+            if written > 0 { stderrLine("Thumbnails: wrote \(written) image(s).") }
+            if failed2 > 0 { stderrLine("⚠ Thumbnails: \(failed2) image(s) could not be extracted.") }
+        }
+
+        // 16 — Open output folder if requested (best-effort, non-fatal).
+        if openOutput && succeeded > 0 {
+            revealOutputDirectory(outputDir)
         }
 
         if failed > 0 {
@@ -453,7 +525,10 @@ struct GatherCommand: AsyncParsableCommand {
         successPayloads: [GatherWorkerOutcome.SuccessPayload],
         db: VortexDB,
         outputDir: String,
-        padValue: Double
+        padValue: Double,
+        useThumbnails: Bool,
+        useEmbedSource: Bool,
+        encodeMode: String
     ) async {
         var manifestClips: [GatherManifestClip] = []
         var padClampedCount = 0
@@ -494,12 +569,18 @@ struct GatherCommand: AsyncParsableCommand {
             }
 
             // Relative paths for manifest (folder can be zipped/moved).
-            let mp4Filename = URL(fileURLWithPath: p.plan.outputPath).lastPathComponent
-            let srtFilename = srtPathAbs.map { URL(fileURLWithPath: $0).lastPathComponent }
+            let mp4Filename   = URL(fileURLWithPath: p.plan.outputPath).lastPathComponent
+            let srtFilename   = srtPathAbs.map { URL(fileURLWithPath: $0).lastPathComponent }
+            let thumbFilename = p.thumbnailPath.map { URL(fileURLWithPath: $0).lastPathComponent }
 
-            // Shell-safe reproduce command (copy-paste ready).
-            let srcPath      = hit.videoPath ?? "UNKNOWN_PATH"
-            let reproducCmd  = "vvx clip \"\(srcPath)\" --start \(rc.resolvedStartSeconds) --end \(rc.resolvedEndSeconds) --pad \(padValue)"
+            // Shell-safe reproduce command (copy-paste ready, includes Step 5 flags when used).
+            let srcPath     = hit.videoPath ?? "UNKNOWN_PATH"
+            var reproducCmd = "vvx clip \"\(srcPath)\" --start \(rc.resolvedStartSeconds) --end \(rc.resolvedEndSeconds) --pad \(padValue)"
+            // Append encode-mode flag only when it differs from the default re-encode.
+            if p.encodeMode == "copy"  { reproducCmd += " --fast" }
+            if p.encodeMode == "exact" { reproducCmd += " --exact" }
+            if useThumbnails  { reproducCmd += " --thumbnails" }
+            if useEmbedSource { reproducCmd += " --embed-source" }
 
             // Engagement snapshot — omit object when all fields nil.
             let engagement: GatherManifestEngagement?
@@ -537,17 +618,24 @@ struct GatherCommand: AsyncParsableCommand {
                 engagement:           engagement,
                 chapter:              chapter,
                 reproduceCommand:     reproducCmd,
-                srtCuesTrimmed:       false
+                srtCuesTrimmed:       false,
+                thumbnailPath:        thumbFilename.map { "./\($0)" },
+                embedSourceApplied:   p.embedSourceApplied,
+                embedSourceNote:      nil,
+                encodeMode:           p.encodeMode
             ))
         }
 
         // Write manifest.json + clips.md.
         do {
             try GatherSidecarWriter.write(
-                clips:      manifestClips,
-                query:      query,
-                padSeconds: padValue,
-                outputDir:  outputDir
+                clips:              manifestClips,
+                query:              query,
+                padSeconds:         padValue,
+                outputDir:          outputDir,
+                thumbnailsEnabled:  useThumbnails,
+                embedSourceEnabled: useEmbedSource,
+                encodeMode:         encodeMode
             )
         } catch {
             stderrLine("⚠ Could not write manifest/clips.md: \(error.localizedDescription)")
@@ -719,10 +807,13 @@ struct GatherCommand: AsyncParsableCommand {
         plan: GatherClipPlan,
         ffmpegPath: URL,
         fast: Bool,
-        pad: Double
+        exact: Bool,
+        pad: Double,
+        thumbnails: Bool
     ) async -> GatherWorkerOutcome {
         let wallStart = Date()
         let rc = plan.resolved
+        let clipEncodeMode = fast ? "copy" : (exact ? "exact" : "default")
 
         do {
             let result = try await FFmpegRunner.clip(
@@ -732,14 +823,42 @@ struct GatherCommand: AsyncParsableCommand {
                 end:           rc.resolvedEndSeconds,
                 outputPath:    plan.outputPath,
                 fast:          fast,
+                exact:         exact,
                 pad:           pad,
-                videoDuration: rc.hit.videoDurationSeconds.map { Double($0) }
+                videoDuration: rc.hit.videoDurationSeconds.map { Double($0) },
+                metadata:      plan.sourceMetadata
             )
+
+            // Thumbnail at L0 (logical start from source — shows the matched thought, not pad handle).
+            var thumbPath: String? = nil
+            if thumbnails, let srcPath = rc.hit.videoPath {
+                let planned = (plan.outputPath as NSString).deletingPathExtension + ".jpg"
+                do {
+                    try await FFmpegRunner.thumbnail(
+                        ffmpegPath: ffmpegPath,
+                        inputPath:  srcPath,
+                        atSeconds:  rc.resolvedStartSeconds,
+                        outputPath: planned
+                    )
+                    thumbPath = planned
+                } catch {
+                    // Soft-fail: thumbnail failure never fails the clip row.
+                }
+            }
+
             let elapsed = Date().timeIntervalSince(wallStart)
             let size = try? FileManager.default.attributesOfItem(
                 atPath: result.outputPath
             )[.size] as? Int64
-            return .success(.init(plan: plan, clipResult: result, sizeBytes: size, elapsed: elapsed))
+            return .success(.init(
+                plan:                plan,
+                clipResult:          result,
+                sizeBytes:           size,
+                elapsed:             elapsed,
+                thumbnailPath:       thumbPath,
+                embedSourceApplied:  plan.sourceMetadata != nil,
+                encodeMode:          clipEncodeMode
+            ))
         } catch let err as FFmpegRunner.ClipError {
             let elapsed = Date().timeIntervalSince(wallStart)
             let vvxErr: VvxError
@@ -811,7 +930,11 @@ struct GatherCommand: AsyncParsableCommand {
                 matchedText:          String(p.plan.resolved.hit.text.prefix(200)),
                 method:               p.clipResult.method,
                 sizeBytes:            p.sizeBytes,
-                snapApplied:          p.plan.resolved.snapApplied.rawValue
+                snapApplied:          p.plan.resolved.snapApplied.rawValue,
+                thumbnailPath:        p.thumbnailPath,
+                embedSourceApplied:   p.embedSourceApplied,
+                embedSourceNote:      nil,
+                encodeMode:           p.encodeMode
             ))
 
         case .failure(let p):
@@ -835,23 +958,55 @@ struct GatherCommand: AsyncParsableCommand {
         resolved: [GatherResolvedClip],
         outputDir: String
     ) -> [GatherClipPlan] {
-        let total = resolved.count
+        let total       = resolved.count
+        let doEmbed     = embedSource
+        let doThumbnail = thumbnails
 
         return resolved.enumerated().map { (i, rc) in
-            let index    = i + 1
-            let indexStr = GatherPathNaming.paddedClipIndex(index, total: total)
+            let index         = i + 1
+            let indexStr      = GatherPathNaming.paddedClipIndex(index, total: total)
             let uploaderToken = GatherPathNaming.uploaderToken(rc.hit.uploader)
-            let timeTag  = TimeParser.formatCompact(rc.resolvedStartSeconds)
-            let snippet  = GatherPathNaming.filenameSnippet(from: rc.hit.text)
-            let filename = "\(indexStr)_\(uploaderToken)_\(timeTag)_\(snippet).mp4"
+            let timeTag       = TimeParser.formatCompact(rc.resolvedStartSeconds)
+            let snippet       = GatherPathNaming.filenameSnippet(from: rc.hit.text)
+            let filename      = "\(indexStr)_\(uploaderToken)_\(timeTag)_\(snippet).mp4"
+
+            let meta: SourceMetadata? = doEmbed ? SourceMetadata(
+                title:   rc.hit.title,
+                artist:  rc.hit.uploader,
+                comment: "Source: \(rc.hit.videoId) | Gathered by vvx"
+            ) : nil
 
             return GatherClipPlan(
-                resolved:   rc,
-                outputPath: (outputDir as NSString).appendingPathComponent(filename),
-                index:      index,
-                total:      total
+                resolved:         rc,
+                outputPath:       (outputDir as NSString).appendingPathComponent(filename),
+                index:            index,
+                total:            total,
+                sourceMetadata:   meta,
+                extractThumbnail: doThumbnail
             )
         }
+    }
+
+    // MARK: - Open output folder (--open, gather only)
+
+    private func revealOutputDirectory(_ path: String) {
+        #if os(macOS)
+        let proc = Process()
+        proc.executableURL = URL(fileURLWithPath: "/usr/bin/open")
+        proc.arguments = [path]
+        proc.standardOutput = FileHandle.nullDevice
+        proc.standardError  = FileHandle.nullDevice
+        try? proc.run()
+        #elseif os(Linux)
+        let proc = Process()
+        proc.executableURL = URL(fileURLWithPath: "/usr/bin/xdg-open")
+        proc.arguments = [path]
+        proc.standardOutput = FileHandle.nullDevice
+        proc.standardError  = FileHandle.nullDevice
+        try? proc.run()
+        #else
+        Foundation.fputs("Note: --open is not supported on this platform.\n", stderr)
+        #endif
     }
 
     // MARK: - Output directory

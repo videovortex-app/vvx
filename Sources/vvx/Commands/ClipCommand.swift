@@ -20,6 +20,7 @@ struct ClipCommand: AsyncParsableCommand {
         Examples:
           vvx clip video.mp4 --start 1:30 --end 1:45
           vvx clip video.mp4 --start 00:14:32 --end 00:14:47 --fast
+          vvx clip video.mp4 --start 00:14:32 --end 00:14:47 --exact
           vvx clip video.mp4 --start 1m30s --duration 15
           vvx clip video.mp4 --start 0:45 --end 1:15 --output ~/Desktop/clip.mp4
           vvx clip video.mp4 --start 12:00 --end 16:30 --open
@@ -44,13 +45,32 @@ struct ClipCommand: AsyncParsableCommand {
     @Flag(help: "Fast mode: keyframe seek + stream copy (no re-encode). Instant but ±2-5s drift.")
     var fast: Bool = false
 
+    @Flag(name: .long, help: "Re-encodes the clip using libx264 (CRF 18) to guarantee frame-accurate padding and high quality. Bypasses hardware acceleration. Mutually exclusive with --fast.")
+    var exact: Bool = false
+
     @Option(name: .long, help: "Seconds of handle before and after the logical in/out for NLE cross-dissolves; padded start is clamped at zero (default: 2.0).")
     var pad: Double = 2.0
 
     @Flag(name: .long, help: "Open the clip in the default video player after extraction.")
     var open: Bool = false
 
+    @Flag(name: .long, help: "Extract one JPEG still beside the output MP4 at the logical start time (L0).")
+    var thumbnails: Bool = false
+
+    @Flag(name: [.customLong("embed-source")], help: "Embed source path and metadata into the MP4 container atoms (standard atoms; format limits apply).")
+    var embedSource: Bool = false
+
     mutating func run() async throws {
+        // Mutual exclusion: --fast and --exact are semantically opposite.
+        if fast && exact {
+            printClipError(
+                code: .parseError,
+                message: "Cannot specify both --fast and --exact.",
+                detail: "Use --fast for stream copy (quick, approximate handles) or --exact for re-encoded high-quality handles — not both."
+            )
+            throw ExitCode.failure
+        }
+
         let startSec = guardParse(start, label: "start")
         let endSec   = resolveEndSeconds(startSec: startSec)
 
@@ -83,10 +103,20 @@ struct ClipCommand: AsyncParsableCommand {
         let resolvedOutput = output.map { resolvePath($0) }
             ?? smartOutputPath(inputPath: resolvedInput, startSec: startSec, endSec: endSec)
 
-        let mode = fast ? "fast (stream copy)" : "frame-accurate"
+        let mode = fast ? "fast (stream copy)" : (exact ? "exact (libx264 CRF 18)" : "frame-accurate")
         fputs("Clipping \(TimeParser.formatHHMMSS(startSec)) → \(TimeParser.formatHHMMSS(endSec)) [\(mode)]...\n", stderr)
 
+        // Build embed metadata when requested. For clip, use the source file path as provenance
+        // since no canonical URL is available without a DB context.
+        let embedMeta: SourceMetadata? = embedSource ? SourceMetadata(
+            title:   nil,
+            artist:  nil,
+            comment: "Source: \(resolvedInput) | Extracted by vvx"
+        ) : nil
+
         let startTime = Date()
+
+        let clipEncodeMode = fast ? "copy" : (exact ? "exact" : "default")
 
         do {
             let result = try await FFmpegRunner.clip(
@@ -96,14 +126,35 @@ struct ClipCommand: AsyncParsableCommand {
                 end: endSec,
                 outputPath: resolvedOutput,
                 fast: fast,
-                pad: pad
+                exact: exact,
+                pad: pad,
+                metadata: embedMeta
             )
 
             let elapsed = Date().timeIntervalSince(startTime)
             let display = result.outputPath.replacingOccurrences(of: NSHomeDirectory(), with: "~")
             fputs("✓ Clip done in \(String(format: "%.1f", elapsed))s → \(display)\n", stderr)
 
-            printClipSuccess(result)
+            // Thumbnail at L0 (logical start on source — the user-specified --start time).
+            var thumbPath: String? = nil
+            if thumbnails {
+                let planned = (resolvedOutput as NSString).deletingPathExtension + ".jpg"
+                do {
+                    try await FFmpegRunner.thumbnail(
+                        ffmpegPath: ffmpegURL,
+                        inputPath:  resolvedInput,
+                        atSeconds:  startSec,
+                        outputPath: planned
+                    )
+                    thumbPath = planned
+                    let thumbDisplay = planned.replacingOccurrences(of: NSHomeDirectory(), with: "~")
+                    fputs("Thumbnail → \(thumbDisplay)\n", stderr)
+                } catch {
+                    fputs("⚠ Thumbnail extraction failed (clip still written).\n", stderr)
+                }
+            }
+
+            printClipSuccess(result, thumbnailPath: thumbPath, encodeMode: clipEncodeMode)
 
             if open { openFile(at: result.outputPath) }
 
@@ -178,24 +229,30 @@ struct ClipCommand: AsyncParsableCommand {
 
     // MARK: - JSON output
 
-    private func printClipSuccess(_ result: ClipResult) {
+    private func printClipSuccess(_ result: ClipResult, thumbnailPath: String? = nil, encodeMode: String = "default") {
         let iso = ISO8601DateFormatter()
         iso.formatOptions = [.withInternetDateTime]
 
         var dict: [String: Any] = [
-            "success":         true,
-            "inputPath":       result.inputPath,
-            "outputPath":      result.outputPath,
-            "startTime":       TimeParser.formatHHMMSS(result.startSeconds),
-            "endTime":         TimeParser.formatHHMMSS(result.endSeconds),
-            "durationSeconds": result.durationSeconds,
-            "padSeconds":      pad,
-            "method":          result.method,
-            "completedAt":     iso.string(from: result.completedAt)
+            "success":              true,
+            "inputPath":            result.inputPath,
+            "outputPath":           result.outputPath,
+            "startTime":            TimeParser.formatHHMMSS(result.startSeconds),
+            "endTime":              TimeParser.formatHHMMSS(result.endSeconds),
+            "durationSeconds":      result.durationSeconds,
+            "padSeconds":           pad,
+            "method":               result.method,
+            "completedAt":          iso.string(from: result.completedAt),
+            "embedSourceApplied":   embedSource,
+            "encodeMode":           encodeMode
         ]
 
         if let bytes = try? FileManager.default.attributesOfItem(atPath: result.outputPath)[.size] as? Int64 {
             dict["sizeBytes"] = bytes
+        }
+
+        if let thumbPath = thumbnailPath {
+            dict["thumbnailPath"] = thumbPath
         }
 
         if let data = try? JSONSerialization.data(
