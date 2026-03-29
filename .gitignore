@@ -13,6 +13,9 @@ xcuserdata/
 .cursor/
 .cursorrules
 
+# Local git hooks (not shared via repo)
+.githooks/
+
 # Old nested package directory (contents hoisted to repo root).
 # Leading slash anchors to repo root so Sources/VideoVortexCore/ is NOT ignored.
 /VideoVortexCore/
