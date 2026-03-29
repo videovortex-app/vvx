@@ -44,6 +44,9 @@ struct ClipCommand: AsyncParsableCommand {
     @Flag(help: "Fast mode: keyframe seek + stream copy (no re-encode). Instant but ±2-5s drift.")
     var fast: Bool = false
 
+    @Option(name: .long, help: "Seconds of handle before and after the logical in/out for NLE cross-dissolves; padded start is clamped at zero (default: 2.0).")
+    var pad: Double = 2.0
+
     @Flag(name: .long, help: "Open the clip in the default video player after extraction.")
     var open: Bool = false
 
@@ -92,7 +95,8 @@ struct ClipCommand: AsyncParsableCommand {
                 start: startSec,
                 end: endSec,
                 outputPath: resolvedOutput,
-                fast: fast
+                fast: fast,
+                pad: pad
             )
 
             let elapsed = Date().timeIntervalSince(startTime)
@@ -185,6 +189,7 @@ struct ClipCommand: AsyncParsableCommand {
             "startTime":       TimeParser.formatHHMMSS(result.startSeconds),
             "endTime":         TimeParser.formatHHMMSS(result.endSeconds),
             "durationSeconds": result.durationSeconds,
+            "padSeconds":      pad,
             "method":          result.method,
             "completedAt":     iso.string(from: result.completedAt)
         ]

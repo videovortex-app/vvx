@@ -99,6 +99,12 @@ public struct SearchHit: Sendable {
     /// Video duration in seconds (`videos.duration_seconds`). Used by `gather` for EOF clamp.
     /// `nil` when the value was not scraped.
     public let videoDurationSeconds: Int?
+    /// View count snapshot from the `videos` table. Used by `gather` manifest engagement block.
+    public let viewCount: Int?
+    /// Like count snapshot. `nil` when not scraped or platform does not expose it.
+    public let likeCount: Int?
+    /// Comment count snapshot. `nil` when not scraped or platform does not expose it.
+    public let commentCount: Int?
 }
 
 /// Result from a read-only SQL query, preserving column order.
@@ -695,7 +701,10 @@ public actor VortexDB {
                    videos.upload_date,
                    videos.chapters,
                    transcript_blocks.chapter_index,
-                   videos.duration_seconds
+                   videos.duration_seconds,
+                   videos.view_count,
+                   videos.like_count,
+                   videos.comment_count
             FROM transcript_blocks
             JOIN videos ON transcript_blocks.video_id = videos.id
             WHERE transcript_blocks MATCH ?1
@@ -722,21 +731,24 @@ public actor VortexDB {
             var hits: [SearchHit] = []
             while sqlite3_step(stmt) == SQLITE_ROW {
                 hits.append(SearchHit(
-                    videoId:             dbColumnText(stmt, 0) ?? "",
-                    title:               dbColumnText(stmt, 1) ?? "",
-                    platform:            dbColumnText(stmt, 2),
-                    uploader:            dbColumnText(stmt, 3),
-                    startTime:           dbColumnText(stmt, 4) ?? "",
-                    endTime:             dbColumnText(stmt, 5) ?? "",
-                    startSeconds:        Double(dbColumnText(stmt, 6) ?? "0") ?? 0,
-                    text:                dbColumnText(stmt, 7) ?? "",
-                    relevanceScore:      sqlite3_column_double(stmt, 8),
-                    videoPath:           dbColumnText(stmt, 9),
-                    transcriptPath:      dbColumnText(stmt, 10),
-                    uploadDate:          dbColumnText(stmt, 11),
-                    chapters:            dbParseChapters(dbColumnText(stmt, 12)),
-                    chapterIndex:        dbColumnOptInt(stmt, 13),
-                    videoDurationSeconds: dbColumnOptInt(stmt, 14)
+                    videoId:              dbColumnText(stmt, 0) ?? "",
+                    title:                dbColumnText(stmt, 1) ?? "",
+                    platform:             dbColumnText(stmt, 2),
+                    uploader:             dbColumnText(stmt, 3),
+                    startTime:            dbColumnText(stmt, 4) ?? "",
+                    endTime:              dbColumnText(stmt, 5) ?? "",
+                    startSeconds:         Double(dbColumnText(stmt, 6) ?? "0") ?? 0,
+                    text:                 dbColumnText(stmt, 7) ?? "",
+                    relevanceScore:       sqlite3_column_double(stmt, 8),
+                    videoPath:            dbColumnText(stmt, 9),
+                    transcriptPath:       dbColumnText(stmt, 10),
+                    uploadDate:           dbColumnText(stmt, 11),
+                    chapters:             dbParseChapters(dbColumnText(stmt, 12)),
+                    chapterIndex:         dbColumnOptInt(stmt, 13),
+                    videoDurationSeconds: dbColumnOptInt(stmt, 14),
+                    viewCount:            dbColumnOptInt(stmt, 15),
+                    likeCount:            dbColumnOptInt(stmt, 16),
+                    commentCount:         dbColumnOptInt(stmt, 17)
                 ))
             }
             return hits
