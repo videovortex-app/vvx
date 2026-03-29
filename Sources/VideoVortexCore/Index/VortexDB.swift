@@ -91,8 +91,14 @@ public struct SearchHit: Sendable {
     public let videoPath: String?
     public let transcriptPath: String?
     public let uploadDate: String?
-    /// Chapter markers for this video — used by `SRTSearcher` to resolve the chapter heading per hit.
+    /// Chapter markers for this video — used by `SRTSearcher` and `GatherCommand --snap chapter`.
     public let chapters: [VideoChapter]
+    /// Zero-based chapter index for this transcript block (`transcript_blocks.chapter_index`).
+    /// `nil` for legacy rows indexed before chapter backfill (`vvx reindex` populates this).
+    public let chapterIndex: Int?
+    /// Video duration in seconds (`videos.duration_seconds`). Used by `gather` for EOF clamp.
+    /// `nil` when the value was not scraped.
+    public let videoDurationSeconds: Int?
 }
 
 /// Result from a read-only SQL query, preserving column order.
@@ -638,33 +644,42 @@ public actor VortexDB {
     /// Execute an FTS5 full-text search against `transcript_blocks`.
     ///
     /// Results are ordered by `bm25()` relevance (most relevant first).
-    /// Each hit includes `video_path`, `transcript_path`, and `upload_date` from
-    /// the `videos` table via a single JOIN — no second query needed.
+    /// Each hit includes `video_path`, `transcript_path`, `upload_date`,
+    /// `chapter_index`, and `duration_seconds` from the `videos` JOIN.
     ///
-    /// Context window assembly (2 blocks before/after each hit) is done by
-    /// `SRTSearcher` (Step 4), which calls `blocksForVideo(videoId:)`.
+    /// Engagement thresholds (`minViews`, `minLikes`, `minComments`) are applied
+    /// **inside the SQL `WHERE` clause**, before `LIMIT`, so `--limit N` always
+    /// returns up to N hits that satisfy all filters.  Nullable engagement columns
+    /// are treated conservatively: NULL means "no data" → the row passes the filter.
     ///
     /// - Parameters:
     ///   - query: FTS5 query.  Supports boolean operators (`AI AND danger`),
     ///     phrase search (`"exact phrase"`), and prefix search (`intell*`).
-    ///   - platform: Optional platform filter (matched against denormalised column).
-    ///   - afterDate: ISO 8601 date; only hits from videos uploaded on or after this
-    ///     date are included.
+    ///   - platform: Optional platform filter.
+    ///   - afterDate: ISO 8601 date; only hits from videos uploaded on or after.
     ///   - uploader: Optional exact-match filter on the `uploader` column.
-    ///   - limit: Maximum hits (default 50).
+    ///   - minViews: When non-nil, exclude videos with a known view count below this.
+    ///   - minLikes: When non-nil, exclude videos with a known like count below this.
+    ///   - minComments: When non-nil, exclude videos with a known comment count below this.
+    ///   - limit: Maximum hits returned (default 50).
     public func search(
         query: String,
         platform: String? = nil,
         afterDate: String? = nil,
         uploader: String? = nil,
+        minViews: Int? = nil,
+        minLikes: Int? = nil,
+        minComments: Int? = nil,
         limit: Int = 50
     ) throws -> [SearchHit] {
-        // Named parameters (?1–?5) allow reuse of the same value in the
-        // NULL-or-value filter idiom with a single binding call per parameter.
+        // Named parameters (?1–?8) allow reuse of the same value in the
+        // NULL-or-value filter idiom.  Engagement predicates use:
+        //   (?N IS NULL OR videos.col IS NULL OR videos.col >= ?N)
+        // — this preserves conservative "no data = pass" semantics for nullable
+        // engagement columns, while correctly filtering when data is present.
         //
         // No table aliases: SQLite FTS5 auxiliary functions (bm25) require the
-        // original table name, not an alias.  Using aliases causes a
-        // "no such column: <alias>" error at prepare time.
+        // original table name, not an alias.
         let sql = """
             SELECT transcript_blocks.video_id,
                    transcript_blocks.title,
@@ -678,15 +693,20 @@ public actor VortexDB {
                    videos.video_path,
                    videos.transcript_path,
                    videos.upload_date,
-                   videos.chapters
+                   videos.chapters,
+                   transcript_blocks.chapter_index,
+                   videos.duration_seconds
             FROM transcript_blocks
             JOIN videos ON transcript_blocks.video_id = videos.id
             WHERE transcript_blocks MATCH ?1
               AND (?2 IS NULL OR transcript_blocks.platform  = ?2)
               AND (?3 IS NULL OR videos.upload_date          >= ?3)
               AND (?4 IS NULL OR COALESCE(transcript_blocks.uploader, videos.uploader) = ?4)
+              AND (?5 IS NULL OR videos.view_count    IS NULL OR videos.view_count    >= ?5)
+              AND (?6 IS NULL OR videos.like_count    IS NULL OR videos.like_count    >= ?6)
+              AND (?7 IS NULL OR videos.comment_count IS NULL OR videos.comment_count >= ?7)
             ORDER BY rank
-            LIMIT ?5;
+            LIMIT ?8;
             """
 
         return try dbPrepare(db, sql) { stmt in
@@ -694,24 +714,29 @@ public actor VortexDB {
             dbBindOptText(stmt, 2, platform)
             dbBindOptText(stmt, 3, afterDate)
             dbBindOptText(stmt, 4, uploader)
-            sqlite3_bind_int(stmt, 5, Int32(limit))
+            dbBindOptInt(stmt, 5, minViews)
+            dbBindOptInt(stmt, 6, minLikes)
+            dbBindOptInt(stmt, 7, minComments)
+            sqlite3_bind_int(stmt, 8, Int32(limit))
 
             var hits: [SearchHit] = []
             while sqlite3_step(stmt) == SQLITE_ROW {
                 hits.append(SearchHit(
-                    videoId:        dbColumnText(stmt, 0) ?? "",
-                    title:          dbColumnText(stmt, 1) ?? "",
-                    platform:       dbColumnText(stmt, 2),
-                    uploader:       dbColumnText(stmt, 3),
-                    startTime:      dbColumnText(stmt, 4) ?? "",
-                    endTime:        dbColumnText(stmt, 5) ?? "",
-                    startSeconds:   Double(dbColumnText(stmt, 6) ?? "0") ?? 0,
-                    text:           dbColumnText(stmt, 7) ?? "",
-                    relevanceScore: sqlite3_column_double(stmt, 8),
-                    videoPath:      dbColumnText(stmt, 9),
-                    transcriptPath: dbColumnText(stmt, 10),
-                    uploadDate:     dbColumnText(stmt, 11),
-                    chapters:       dbParseChapters(dbColumnText(stmt, 12))
+                    videoId:             dbColumnText(stmt, 0) ?? "",
+                    title:               dbColumnText(stmt, 1) ?? "",
+                    platform:            dbColumnText(stmt, 2),
+                    uploader:            dbColumnText(stmt, 3),
+                    startTime:           dbColumnText(stmt, 4) ?? "",
+                    endTime:             dbColumnText(stmt, 5) ?? "",
+                    startSeconds:        Double(dbColumnText(stmt, 6) ?? "0") ?? 0,
+                    text:                dbColumnText(stmt, 7) ?? "",
+                    relevanceScore:      sqlite3_column_double(stmt, 8),
+                    videoPath:           dbColumnText(stmt, 9),
+                    transcriptPath:      dbColumnText(stmt, 10),
+                    uploadDate:          dbColumnText(stmt, 11),
+                    chapters:            dbParseChapters(dbColumnText(stmt, 12)),
+                    chapterIndex:        dbColumnOptInt(stmt, 13),
+                    videoDurationSeconds: dbColumnOptInt(stmt, 14)
                 ))
             }
             return hits
