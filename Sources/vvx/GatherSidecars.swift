@@ -37,10 +37,19 @@ struct GatherManifestClip: Encodable {
     let paddedEndSeconds: Double
     let engagement: GatherManifestEngagement?
     let chapter: GatherManifestChapter?
-    /// Literal shell command to reproduce this exact clip with the same pad.
+    /// Literal shell command to reproduce this exact clip with the same pad (and Step 5 flags).
     let reproduceCommand: String
     /// `true` only if the whole-cue rule had to be overridden (currently always `false`).
     let srtCuesTrimmed: Bool
+    // MARK: Step 5 fields
+    /// Relative path to the JPEG thumbnail extracted at logical start (L0), or `null`.
+    let thumbnailPath: String?
+    /// `true` when `--embed-source` was on and the clip mux succeeded.
+    let embedSourceApplied: Bool
+    /// Populated when embed was skipped or partially applied — otherwise `null`.
+    let embedSourceNote: String?
+    /// Encode mode used: `"copy"` (--fast), `"default"` (re-encode + VideoToolbox), or `"exact"` (--exact, libx264 CRF 18).
+    let encodeMode: String
 }
 
 struct GatherManifest: Encodable {
@@ -48,14 +57,31 @@ struct GatherManifest: Encodable {
     let query: String
     let padSeconds: Double
     let generatedAt: String
+    /// `true` when the run used `--thumbnails`.
+    let thumbnailsEnabled: Bool
+    /// `true` when the run used `--embed-source`.
+    let embedSourceEnabled: Bool
+    /// Encode mode for this run: `"copy"` (--fast), `"default"`, or `"exact"` (--exact).
+    let encodeMode: String
     let clips: [GatherManifestClip]
 
-    init(query: String, padSeconds: Double, generatedAt: String, clips: [GatherManifestClip]) {
-        self.schemaVersion = 1
-        self.query         = query
-        self.padSeconds    = padSeconds
-        self.generatedAt   = generatedAt
-        self.clips         = clips
+    init(
+        query: String,
+        padSeconds: Double,
+        generatedAt: String,
+        thumbnailsEnabled: Bool,
+        embedSourceEnabled: Bool,
+        encodeMode: String,
+        clips: [GatherManifestClip]
+    ) {
+        self.schemaVersion      = 2
+        self.query              = query
+        self.padSeconds         = padSeconds
+        self.generatedAt        = generatedAt
+        self.thumbnailsEnabled  = thumbnailsEnabled
+        self.embedSourceEnabled = embedSourceEnabled
+        self.encodeMode         = encodeMode
+        self.clips              = clips
     }
 }
 
@@ -71,15 +97,21 @@ enum GatherSidecarWriter {
         clips: [GatherManifestClip],
         query: String,
         padSeconds: Double,
-        outputDir: String
+        outputDir: String,
+        thumbnailsEnabled: Bool,
+        embedSourceEnabled: Bool,
+        encodeMode: String
     ) throws {
         let iso = ISO8601DateFormatter()
         iso.formatOptions = [.withInternetDateTime]
         let manifest = GatherManifest(
-            query: query,
-            padSeconds: padSeconds,
-            generatedAt: iso.string(from: Date()),
-            clips: clips
+            query:              query,
+            padSeconds:         padSeconds,
+            generatedAt:        iso.string(from: Date()),
+            thumbnailsEnabled:  thumbnailsEnabled,
+            embedSourceEnabled: embedSourceEnabled,
+            encodeMode:         encodeMode,
+            clips:              clips
         )
 
         let encoder = JSONEncoder()
@@ -94,6 +126,8 @@ enum GatherSidecarWriter {
     }
 
     // MARK: - clips.md template
+    // Note: No Step 5 fields (thumbnail paths / embed status) in clips.md — keep it
+    // text-only so imports into Obsidian, Notion, etc. do not gain broken local image links.
 
     private static func buildClipsMD(clips: [GatherManifestClip], query: String) -> String {
         let dateStr: String = {
