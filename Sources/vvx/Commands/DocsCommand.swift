@@ -277,13 +277,13 @@ private extension DocsCommand {
 private extension DocsCommand {
     var searchSection: String {
         """
-        ## search — Full-text search across indexed transcripts
+        ## search — Full-text and structural search across indexed transcripts
 
         Searches the FTS5 transcript index in `vortex.db`. Returns ranked hits with
         surrounding context. Requires at least one video to be indexed first (via `sense`,
         `fetch`, or `sync`).
 
-        ### Usage
+        ### Usage — keyword search
         ```
         vvx search "query"
         vvx search "query" --rag                        # structured Markdown for direct answer
@@ -291,7 +291,7 @@ private extension DocsCommand {
         vvx search "\\"exact phrase\\""                 # phrase search
         vvx search "intell*"                            # prefix search
         vvx search "query" --max-tokens 5000            # token-budget cap for --rag output
-        vvx search "query" --limit 20                   # max hits (default: 10)
+        vvx search "query" --limit 20                   # max hits (default: 50)
         vvx search "query" --platform YouTube           # filter by platform
         vvx search "query" --after 2026-01-01           # filter by upload date
         vvx search "query" --uploader "Channel Name"    # filter by uploader
@@ -361,10 +361,107 @@ private extension DocsCommand {
         Clips with no local archive file are skipped (emit `NleSkipEntry` NDJSON + stderr warning).
         Run `vvx fetch "<url>" --archive` to download missing source videos, then retry.
 
+        ### Structural search (no query required)
+
+        Deterministic transcript structure analysis — no LLM, no network, no cloud.
+        Operates on existing `transcript_blocks` data only. Free tier (no Pro gate).
+
+        #### `--longest-monologue`
+        Finds the single longest contiguous speech span per video, ranked by duration descending.
+        Two consecutive blocks are merged when the gap between them ≤ `--monologue-gap`.
+
+        ```
+        vvx search --longest-monologue
+        vvx search --longest-monologue --uploader "Lex Fridman"
+        vvx search --longest-monologue --platform YouTube --limit 5
+        vvx search --longest-monologue --monologue-gap 3.0 --after 2025-01-01
+        ```
+
+        | Flag | Default | Description |
+        |------|---------|-------------|
+        | `--monologue-gap <seconds>` | `1.5` | Max silence gap in seconds still counted as the same span. |
+
+        NDJSON output per result (one line per video):
+        ```json
+        {
+          "success": true,
+          "mode": "longest_monologue",
+          "rank": 1,
+          "videoTitle": "Lex Fridman Podcast #400",
+          "uploader": "Lex Fridman",
+          "platform": "YouTube",
+          "uploadDate": "2026-01-15",
+          "videoPath": "/abs/path/to/video.mp4",
+          "startSeconds": 1432.5,
+          "endSeconds": 1874.0,
+          "durationSeconds": 441.5,
+          "blockCount": 87,
+          "structuralScore": 441.5,
+          "transcriptExcerpt": "...first ~1000 chars of span text...",
+          "reproduceCommand": "vvx clip \\"/abs/path/video.mp4\\" --start 1432.5 --end 1874.0"
+        }
+        ```
+        Final summary line:
+        ```json
+        {"success":true,"mode":"longest_monologue","scannedVideos":42,"resultCount":5,"limit":5,"uploader":"Lex Fridman","platform":null,"afterDate":null}
+        ```
+
+        #### `--high-density`
+        Finds the highest words-per-second window per video using a two-pointer sliding window.
+        Score = `wordCount / windowSeconds`. Ranked by `wordsPerSecond` descending.
+
+        ```
+        vvx search --high-density
+        vvx search --high-density --density-window 30
+        vvx search --high-density --uploader "Joe Rogan" --limit 10
+        vvx search --high-density --platform YouTube --density-window 45 --after 2025-01-01
+        ```
+
+        | Flag | Default | Description |
+        |------|---------|-------------|
+        | `--density-window <seconds>` | `60.0` | Sliding window width. Use `30` for tight highlight-reel clips. |
+
+        NDJSON output per result (one line per video):
+        ```json
+        {
+          "success": true,
+          "mode": "high_density",
+          "rank": 1,
+          "videoTitle": "Joe Rogan Experience #2100",
+          "uploader": "PowerfulJRE",
+          "platform": "YouTube",
+          "uploadDate": "2026-02-01",
+          "videoPath": "/abs/path/to/video.mp4",
+          "startSeconds": 3220.0,
+          "endSeconds": 3280.0,
+          "windowSeconds": 60.0,
+          "wordCount": 412,
+          "wordsPerSecond": 6.87,
+          "structuralScore": 6.87,
+          "transcriptExcerpt": "...first ~1000 chars of window text...",
+          "reproduceCommand": "vvx clip \\"/abs/path/video.mp4\\" --start 3220.0 --end 3280.0"
+        }
+        ```
+
+        #### Structural search mutual-exclusion rules
+        - `--longest-monologue` and `--high-density` cannot be combined.
+        - Neither flag can be combined with a query string.
+        - Neither flag can be combined with `--export-nle`.
+        - `--rag` cannot be used with structural flags.
+        - `--uploader`, `--platform`, `--after`, and `--limit` are compatible with both flags.
+
+        #### `structuralScore` field
+        A unified float for sorting/filtering in agent pipelines.
+        - `longest_monologue`: span duration in seconds (higher = longer).
+        - `high_density`: words per second (higher = denser).
+
         ### Agent rules for search
         - Use `--rag` when generating a user-facing answer from transcript content.
         - Use JSON output when chaining into `clip` — extract `videoPath`, `timestamp`,
           and `timestampEnd` from each hit.
+        - Use `--longest-monologue` to find the best long-form rant or deep dive.
+        - Use `--high-density` to find the moment a speaker hammers a topic hardest.
+        - For structural results, use `reproduceCommand` to cut the clip directly.
         - `INDEX_EMPTY` error means no videos are indexed yet: run `vvx sync <url> --limit 10`.
         - For NLE export, source files must be on disk. Use `--dry-run` to check clip availability
           before writing the file.

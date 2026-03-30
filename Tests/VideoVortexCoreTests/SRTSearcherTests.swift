@@ -367,11 +367,11 @@ struct SRTSearcherTests {
     @Test("contextWindow helper returns correct 2-before / 2-after slices with timestamps")
     func testContextWindowPureFunction() {
         let blocks: [StoredBlock] = [
-            StoredBlock(startTime: "00:00:01,000", endTime: "00:00:04,000", startSeconds: 1.0, text: "A"),
-            StoredBlock(startTime: "00:00:05,000", endTime: "00:00:08,000", startSeconds: 5.0, text: "B"),
-            StoredBlock(startTime: "00:00:09,000", endTime: "00:00:12,000", startSeconds: 9.0, text: "C"),
-            StoredBlock(startTime: "00:00:13,000", endTime: "00:00:16,000", startSeconds: 13.0, text: "D"),
-            StoredBlock(startTime: "00:00:17,000", endTime: "00:00:20,000", startSeconds: 17.0, text: "E"),
+            StoredBlock(startTime: "00:00:01,000", endTime: "00:00:04,000", startSeconds: 1.0, endSeconds: 4.0, text: "A"),
+            StoredBlock(startTime: "00:00:05,000", endTime: "00:00:08,000", startSeconds: 5.0, endSeconds: 8.0, text: "B"),
+            StoredBlock(startTime: "00:00:09,000", endTime: "00:00:12,000", startSeconds: 9.0, endSeconds: 12.0, text: "C"),
+            StoredBlock(startTime: "00:00:13,000", endTime: "00:00:16,000", startSeconds: 13.0, endSeconds: 16.0, text: "D"),
+            StoredBlock(startTime: "00:00:17,000", endTime: "00:00:20,000", startSeconds: 17.0, endSeconds: 20.0, text: "E"),
         ]
 
         // Hit is block "C" (index 2).
