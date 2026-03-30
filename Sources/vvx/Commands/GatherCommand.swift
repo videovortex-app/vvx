@@ -36,6 +36,9 @@ private struct GatherClipSuccess: Encodable {
     let embedSourceNote: String?
     /// Encode mode: `"copy"` (--fast), `"default"`, or `"exact"` (--exact, libx264 CRF 18).
     let encodeMode: String
+    // Phase 3 — chapter gather
+    let chapterTitle: String?
+    let chapterIndex: Int?
 }
 
 private struct GatherClipFailure: Encodable {
@@ -70,6 +73,9 @@ private struct GatherDryRunEntry: Encodable {
     let embedSourcePlanned: Bool
     /// Encode mode that would be used: `"copy"`, `"default"`, or `"exact"`.
     let encodeMode: String
+    // Phase 3 — chapter gather
+    let chapterTitle: String?
+    let chapterIndex: Int?
 }
 
 private struct GatherEmptySummary: Encodable {
@@ -144,6 +150,13 @@ struct GatherCommand: AsyncParsableCommand {
           --pad N              Seconds of handle before/after logical in/out for NLE cross-dissolves
                                (default: 2.0). Applied by FFmpegRunner after snap/context resolution.
 
+        Chapter-first gather (extract full creator-defined segments):
+          vvx gather "AGI" --chapters-only
+          vvx gather "AI safety" --chapters-only --limit 3
+          vvx gather "robotics" --chapters-only --uploader "Lex Fridman" --pad 0
+          vvx gather "energy" --chapters-only --after 2024-01-01 --limit 5
+        Note: --snap chapter is implied with --chapters-only. --context-seconds is ignored.
+
         Examples:
           vvx gather "artificial general intelligence" --limit 10
           vvx gather "AI AND danger" --uploader "Lex Fridman" --context-seconds 2
@@ -153,6 +166,7 @@ struct GatherCommand: AsyncParsableCommand {
           vvx gather "AGI" --limit 5 --fast -o ~/Desktop/agi-clips
           vvx gather "news" --max-total-duration 600
           vvx gather "neuralink" --pad 0      # tight cuts, no handles
+          vvx gather "AGI safety" --chapters-only --limit 3
         """
     )
 
@@ -189,8 +203,8 @@ struct GatherCommand: AsyncParsableCommand {
     @Option(name: .long, help: "Adds N seconds before/after the matched cue (default: 1.0). Ignored when --snap block or --snap chapter.")
     var contextSeconds: Double = 1.0
 
-    @Option(name: .long, help: "Snap mode: off (cue + context), block (exact cue), chapter (full chapter span). Default: off.")
-    var snap: SnapMode = .off
+    @Option(name: .long, help: "Snap mode: off (cue + context), block (exact cue), chapter (full chapter span). Default: off. Omitting the flag is equivalent to --snap off.")
+    var snap: SnapMode?
 
     @Option(name: .long, help: "Hard cap on total resolved clip duration in seconds. Drops lower-relevance clips first.")
     var maxTotalDuration: Double?
@@ -225,6 +239,17 @@ struct GatherCommand: AsyncParsableCommand {
     @Flag(name: [.customLong("embed-source")], help: "Embed source URL, title, and uploader into MP4 metadata during extraction (standard atoms; format limits apply).")
     var embedSource: Bool = false
 
+    // MARK: - Chapter-first gather (Phase 3 — Step 8)
+
+    @Flag(name: .customLong("chapters-only"),
+          help: """
+          Search chapter titles instead of transcript text and extract each matching chapter \
+          as a clip. Chapter boundaries are used directly — --snap chapter is implied and \
+          --context-seconds is ignored. --pad is applied normally as NLE handles. \
+          Mutually exclusive with --snap off and --snap block.
+          """)
+    var chaptersOnly: Bool = false
+
     // MARK: - Run
 
     mutating func run() async throws {
@@ -240,6 +265,40 @@ struct GatherCommand: AsyncParsableCommand {
             ))
             print(env.jsonString())
             throw ExitCode(VvxExitCode.forErrorCode(.parseError))
+        }
+
+        // 1c — --chapters-only validation.
+        if chaptersOnly {
+            if let s = snap, s == .off || s == .block {
+                let env = VvxErrorEnvelope(error: VvxError(
+                    code: .parseError,
+                    message: "--snap off/block cannot be combined with --chapters-only. Chapter snap is implicit.",
+                    agentAction: "Remove --snap (or use --snap chapter, which is the default with --chapters-only)."
+                ))
+                print(env.jsonString())
+                throw ExitCode(VvxExitCode.forErrorCode(.parseError))
+            }
+            // --context-seconds note (non-fatal when caller passed a non-default value)
+            if contextSeconds != 1.0 {
+                stderrLine("Note: --context-seconds is ignored with --chapters-only; chapter boundaries are used directly.")
+            }
+        }
+
+        // 1d — --chapters-only early dispatch (before DB open in main path).
+        if chaptersOnly {
+            let db: VortexDB
+            do {
+                db = try VortexDB.open()
+            } catch {
+                let env = VvxErrorEnvelope(error: VvxError(
+                    code: .indexCorrupt,
+                    message: "Could not open vortex.db: \(error.localizedDescription)"
+                ))
+                print(env.jsonString())
+                throw ExitCode(VvxExitCode.forErrorCode(.indexCorrupt))
+            }
+            try await runChaptersOnlyGather(db: db)
+            return
         }
 
         stderrLine("Searching vortex.db for gather candidates…")
@@ -305,7 +364,7 @@ struct GatherCommand: AsyncParsableCommand {
         // 6 — Resolve windows via shared ClipWindowResolver; print any warnings.
         let (resolved, resolveWarnings) = ClipWindowResolver.resolveWindows(
             hits:           hits,
-            snapMode:       snap,
+            snapMode:       snap ?? .off,
             contextSeconds: contextSeconds
         )
         for w in resolveWarnings { stderrLine(w) }
@@ -411,7 +470,12 @@ struct GatherCommand: AsyncParsableCommand {
                     snapApplied:            rc.snapApplied.rawValue,
                     plannedThumbnailPath:   thumbPlan,
                     embedSourcePlanned:     embedSource,
-                    encodeMode:             runEncodeMode
+                    encodeMode:             runEncodeMode,
+                    chapterTitle:           rc.hit.chapterIndex.flatMap { idx in
+                        guard idx >= 0, idx < rc.hit.chapters.count else { return nil }
+                        return rc.hit.chapters[idx].title
+                    },
+                    chapterIndex:           rc.hit.chapterIndex
                 ))
             }
             stderrLine("Dry run: \(plans.count) clip(s) planned\(skipNote).")
@@ -499,6 +563,247 @@ struct GatherCommand: AsyncParsableCommand {
         }
 
         if failed > 0 {
+            throw ExitCode(1)
+        }
+    }
+
+    // MARK: - Chapters-only gather
+
+    private mutating func runChaptersOnlyGather(db: VortexDB) async throws {
+        let terms = query
+            .split(separator: " ")
+            .map(String.init)
+            .filter { !$0.isEmpty }
+
+        let summaries: [VideoSummary]
+        do {
+            summaries = try await db.videoSummaries(
+                platform:  platform,
+                uploader:  uploader,
+                afterDate: after
+            )
+        } catch {
+            let env = VvxErrorEnvelope(error: VvxError(
+                code: .indexCorrupt,
+                message: "Could not query videos: \(error.localizedDescription)"
+            ))
+            print(env.jsonString())
+            throw ExitCode(VvxExitCode.forErrorCode(.indexCorrupt))
+        }
+
+        stderrLine("Scanning \(summaries.count) video(s) for chapter title matches…")
+
+        // Collect matching chapters (AND semantics).
+        struct ChapterMatch {
+            let summary:      VideoSummary
+            let chapter:      VideoChapter
+            let chapterIndex: Int
+            let termCount:    Int
+        }
+
+        var matches: [ChapterMatch] = []
+        for summary in summaries {
+            for (idx, chapter) in summary.chapters.enumerated() {
+                let lowerTitle   = chapter.title.lowercased()
+                let matchedTerms = terms.filter { lowerTitle.contains($0.lowercased()) }
+                if matchedTerms.count == terms.count {
+                    matches.append(ChapterMatch(
+                        summary:      summary,
+                        chapter:      chapter,
+                        chapterIndex: idx,
+                        termCount:    matchedTerms.count
+                    ))
+                }
+            }
+        }
+
+        if matches.isEmpty {
+            stderrLine("No chapter titles matched \"\(query)\". Try broader terms or use vvx gather without --chapters-only.")
+            printNDJSON(GatherEmptySummary(query: query))
+            return
+        }
+
+        matches.sort {
+            if $0.termCount != $1.termCount { return $0.termCount > $1.termCount }
+            if $0.summary.id == $1.summary.id { return $0.chapter.startTime < $1.chapter.startTime }
+            return false
+        }
+
+        let topMatches = Array(matches.prefix(limit))
+
+        // Resolve output directory.
+        let outputDir = resolveOutputDirectory()
+        if !dryRun {
+            try FileManager.default.createDirectory(
+                atPath: outputDir,
+                withIntermediateDirectories: true,
+                attributes: nil
+            )
+        }
+
+        // Resolve ffmpeg (skip for dry-run).
+        let ffmpegURL: URL?
+        if !dryRun {
+            ffmpegURL = EngineResolver.cliResolver.resolvedFfmpegURL()
+            guard ffmpegURL != nil else {
+                let env = VvxErrorEnvelope(error: VvxError(
+                    code: .ffmpegNotFound,
+                    message: "ffmpeg is required for clip extraction."
+                ))
+                print(env.jsonString())
+                throw ExitCode(VvxExitCode.engineNotFound)
+            }
+        } else {
+            ffmpegURL = nil
+        }
+
+        let padValue      = pad
+        let runEncodeMode = fast ? "copy" : (exact ? "exact" : "default")
+        var succeeded     = 0
+        var failCount     = 0
+
+        for (i, m) in topMatches.enumerated() {
+            let rank = i + 1
+            guard let videoPath = m.summary.videoPath,
+                  FileManager.default.fileExists(atPath: videoPath) else {
+                stderrLine("[\(rank)/\(topMatches.count)] ⚠ Skipping '\(m.chapter.title)' — source file not on disk.")
+                printNDJSON(GatherClipFailure(
+                    error: VvxError(
+                        code: .videoUnavailable,
+                        message: "Source video not on disk for \(m.summary.id). Download it first.",
+                        agentAction: "Run 'vvx fetch \"\(m.summary.id)\" --archive' to download the video, then retry gather."
+                    ),
+                    videoId:   m.summary.id,
+                    startTime: TimeParser.formatHHMMSS(m.chapter.startTime),
+                    endTime:   ""
+                ))
+                failCount += 1
+                continue
+            }
+
+            let startSecs = m.chapter.startTime
+            let endSecs: Double
+            let chapters = m.summary.chapters
+            if m.chapterIndex + 1 < chapters.count {
+                endSecs = chapters[m.chapterIndex + 1].startTime
+            } else if let dur = m.summary.durationSeconds {
+                endSecs = Double(dur)
+            } else {
+                stderrLine("[\(rank)/\(topMatches.count)] ⚠ Skipping '\(m.chapter.title)' — unknown chapter end time (last chapter, no duration).")
+                failCount += 1
+                continue
+            }
+
+            let paddedStart = max(0, startSecs - padValue)
+            let paddedEnd   = endSecs + padValue
+            let dur         = endSecs - startSecs
+            let startFmt    = TimeParser.formatHHMMSS(startSecs)
+            let endFmt      = TimeParser.formatHHMMSS(endSecs)
+
+            let safeTitle   = GatherPathNaming.sanitizeFolderQuery(m.summary.title)
+            let filename    = "\(GatherPathNaming.paddedClipIndex(rank, total: topMatches.count))_\(safeTitle)_ch\(m.chapterIndex)_\(TimeParser.formatCompact(startSecs)).mp4"
+            let outputPath  = (outputDir as NSString).appendingPathComponent(filename)
+            let srtPlan     = (outputPath as NSString).deletingPathExtension + ".srt"
+
+            if dryRun {
+                printNDJSON(GatherDryRunEntry(
+                    plannedOutputPath:      outputPath,
+                    inputPath:              videoPath,
+                    videoId:                m.summary.id,
+                    title:                  m.summary.title,
+                    uploader:               m.summary.uploader,
+                    startTime:              startFmt,
+                    endTime:                endFmt,
+                    resolvedStartSeconds:   startSecs,
+                    resolvedEndSeconds:     endSecs,
+                    padSeconds:             padValue,
+                    paddedStartSeconds:     paddedStart,
+                    paddedEndSeconds:       paddedEnd,
+                    plannedDurationSeconds: dur + padValue * 2,
+                    plannedSrtPath:         srtPlan,
+                    matchedText:            "",
+                    snapApplied:            "chapter",
+                    plannedThumbnailPath:   nil,
+                    embedSourcePlanned:     embedSource,
+                    encodeMode:             runEncodeMode,
+                    chapterTitle:           m.chapter.title,
+                    chapterIndex:           m.chapterIndex
+                ))
+                succeeded += 1
+                continue
+            }
+
+            do {
+                let result = try await FFmpegRunner.clip(
+                    ffmpegPath:    ffmpegURL!,
+                    inputPath:     videoPath,
+                    start:         startSecs,
+                    end:           endSecs,
+                    outputPath:    outputPath,
+                    fast:          fast,
+                    exact:         exact,
+                    pad:           padValue,
+                    videoDuration: m.summary.durationSeconds.map { Double($0) },
+                    metadata:      nil
+                )
+
+                let size = try? FileManager.default.attributesOfItem(atPath: result.outputPath)[.size] as? Int64
+
+                stderrLine("[\(rank)/\(topMatches.count)] ✓ \(m.summary.uploader ?? m.summary.title) — \(startFmt)→\(endFmt)")
+
+                // Write SRT sidecar.
+                let blocks = (try? await db.blocksForVideo(videoId: m.summary.id)) ?? []
+                if !blocks.isEmpty,
+                   let srtContent = SRTRetimer.retimed(blocks: blocks, paddedStart: result.startSeconds, paddedEnd: result.endSeconds) {
+                    try? srtContent.write(toFile: srtPlan, atomically: true, encoding: .utf8)
+                }
+
+                printNDJSON(GatherClipSuccess(
+                    outputPath:           result.outputPath,
+                    inputPath:            result.inputPath,
+                    videoId:              m.summary.id,
+                    title:                m.summary.title,
+                    uploader:             m.summary.uploader,
+                    startTime:            startFmt,
+                    endTime:              endFmt,
+                    durationSeconds:      result.durationSeconds,
+                    resolvedStartSeconds: startSecs,
+                    resolvedEndSeconds:   endSecs,
+                    padSeconds:           padValue,
+                    paddedStartSeconds:   result.startSeconds,
+                    paddedEndSeconds:     result.endSeconds,
+                    plannedSrtPath:       srtPlan,
+                    matchedText:          "",
+                    method:               result.method,
+                    sizeBytes:            size,
+                    snapApplied:          "chapter",
+                    thumbnailPath:        nil,
+                    embedSourceApplied:   false,
+                    embedSourceNote:      nil,
+                    encodeMode:           runEncodeMode,
+                    chapterTitle:         m.chapter.title,
+                    chapterIndex:         m.chapterIndex
+                ))
+                succeeded += 1
+            } catch {
+                stderrLine("[\(rank)/\(topMatches.count)] ✗ \(m.chapter.title) — extraction failed: \(error.localizedDescription)")
+                printNDJSON(GatherClipFailure(
+                    error: VvxError(code: .clipFailed, message: "Clip extraction failed: \(error.localizedDescription)"),
+                    videoId:   m.summary.id,
+                    startTime: startFmt,
+                    endTime:   endFmt
+                ))
+                failCount += 1
+            }
+        }
+
+        stderrLine("Gathered \(succeeded) chapter clip(s). \(failCount) failed.")
+
+        if dryRun {
+            stderrLine("Dry run: \(succeeded) clip(s) planned.")
+        }
+
+        if failCount > 0 {
             throw ExitCode(1)
         }
     }
@@ -766,7 +1071,12 @@ struct GatherCommand: AsyncParsableCommand {
                 thumbnailPath:        p.thumbnailPath,
                 embedSourceApplied:   p.embedSourceApplied,
                 embedSourceNote:      nil,
-                encodeMode:           p.encodeMode
+                encodeMode:           p.encodeMode,
+                chapterTitle:         p.plan.resolved.hit.chapterIndex.flatMap { idx in
+                    guard idx >= 0, idx < p.plan.resolved.hit.chapters.count else { return nil }
+                    return p.plan.resolved.hit.chapters[idx].title
+                },
+                chapterIndex:         p.plan.resolved.hit.chapterIndex
             ))
 
         case .failure(let p):

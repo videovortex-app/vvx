@@ -15,6 +15,7 @@ struct SRTRetimerTests {
             startTime:    SRTRetimer.srtTimestamp(start),
             endTime:      SRTRetimer.srtTimestamp(end),
             startSeconds: start,
+            endSeconds:   end,
             text:         text
         )
     }

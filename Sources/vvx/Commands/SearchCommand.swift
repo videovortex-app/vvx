@@ -31,6 +31,23 @@ struct SearchCommand: AsyncParsableCommand {
           Imports into Final Cut Pro, Premiere Pro, or DaVinci Resolve as a ready-to-cut
           project referencing archive files in-place — zero re-encode.
 
+        Structural search (no query required):
+          vvx search --uploader "Lex Fridman" --longest-monologue
+          vvx search --platform YouTube --high-density --limit 10
+          vvx search --after 2025-01-01 --longest-monologue --monologue-gap 3.0
+          vvx search --uploader "Joe Rogan" --high-density --density-window 30 --limit 5
+
+        Proximity search (explicit AND required):
+          vvx search "AGI AND security" --within 30
+          vvx search "Tesla AND autopilot" --within 45 --uploader "Lex Fridman"
+          vvx search "neuralink AND FDA" --within 60 --after 2024-01-01 --limit 10
+
+        Chapter search (chapters-only mode):
+          vvx search "AGI safety" --chapters-only
+          vvx search "nuclear energy" --chapters-only --uploader "Lex Fridman"
+          vvx search "mars" --chapters-only --platform YouTube --limit 10
+          vvx search "robotics" --chapters-only --after 2024-01-01
+
         Examples:
           vvx search "artificial general intelligence"
           vvx search "AGI" --limit 20
@@ -40,16 +57,19 @@ struct SearchCommand: AsyncParsableCommand {
           vvx search "interview" --uploader "Lex Fridman"
           vvx search "AGI" --rag
           vvx search "neuralink" --export-nle fcpx --export-nle-out ~/Desktop/cuts.fcpxml
-          vvx search "neuralink" --export-nle premiere --export-nle-out ~/Desktop/cuts.xml
-          vvx search "neuralink" --export-nle resolve --export-nle-out ~/Desktop/cuts.edl
           vvx search "AGI" --export-nle fcpx --export-nle-out ~/Desktop/agi.fcpxml --dry-run
+          vvx search --uploader "Lex Fridman" --longest-monologue --limit 5
+          vvx search --platform YouTube --high-density --density-window 30 --limit 10
+          vvx search "AGI AND security" --within 30
+          vvx search "Tesla AND autopilot" --within 45 --uploader "Lex Fridman"
+          vvx search "AGI safety" --chapters-only --limit 5
         """
     )
 
     // MARK: - Base search flags
 
-    @Argument(help: "The search query. Supports FTS5 syntax: AND, OR, NOT, phrase, prefix*.")
-    var query: String
+    @Argument(help: "FTS5 search query. Required for keyword search, NLE export, and proximity (--within). Not required when using --longest-monologue or --high-density.")
+    var query: String?
 
     @Option(name: .long, help: "Maximum number of results to return (default: 50).")
     var limit: Int = 50
@@ -101,20 +121,622 @@ struct SearchCommand: AsyncParsableCommand {
           help: "Print planned clip list without writing the NLE export file.")
     var dryRun: Bool = false
 
+    // MARK: - Structural search flags (Phase 1 — Step 8)
+
+    @Flag(name: .customLong("longest-monologue"),
+          help: "Find the longest contiguous speech span per video. Sorted by duration descending. No query required. Compatible with --uploader, --platform, --after, --limit, --monologue-gap.")
+    var longestMonologue: Bool = false
+
+    @Flag(name: .customLong("high-density"),
+          help: "Find the highest words-per-second window per video. Sorted by density descending. No query required. Compatible with --uploader, --platform, --after, --limit, --density-window.")
+    var highDensity: Bool = false
+
+    @Option(name: .customLong("monologue-gap"),
+            help: "Maximum gap in seconds between consecutive transcript blocks still considered part of the same monologue span. Only applies to --longest-monologue. Default: 1.5. Must be >= 0.")
+    var monologueGap: Double = 1.5
+
+    @Option(name: .customLong("density-window"),
+            help: "Sliding window width in seconds for --high-density scoring. Use 30 for tight highlight-reel clips. Default: 60.0. Must be > 0.")
+    var densityWindow: Double = 60.0
+
+    // MARK: - Proximity search flag (Phase 2 — Step 8)
+
+    @Option(name: .customLong("within"),
+            help: """
+            Proximity window in seconds. Activates only when the query contains explicit \
+            AND (e.g. 'AGI AND security'). Results sorted by tightest collision first \
+            (smallest proximitySpanSeconds). Must be > 0.
+            """)
+    var within: Double?
+
+    // MARK: - Chapter search flag (Phase 3 — Step 8)
+
+    @Flag(name: .customLong("chapters-only"),
+          help: """
+          Search chapter titles instead of transcript text. Returns one result per matching \
+          chapter. Compatible with --uploader, --platform, --after, --limit. \
+          Mutually exclusive with --longest-monologue, --high-density, --rag, --export-nle.
+          """)
+    var chaptersOnly: Bool = false
+
     // MARK: - Run
 
     mutating func run() async throws {
+        let isStructural   = longestMonologue || highDensity
+        let isProximity    = within != nil
+        let isChaptersOnly = chaptersOnly
 
-        // --- NLE export branch --------------------------------------------------
+        // --- Mutual-exclusion validation (runs before any DB open) ----------
+
+        guard isStructural || isProximity || isChaptersOnly || query != nil else {
+            emitError(code: .parseError,
+                      message: "A search query is required when no structural or proximity flag is specified.",
+                      agentAction: "Provide a search query string, or use --longest-monologue / --high-density / --within for structural/proximity search.")
+            throw ExitCode(VvxExitCode.userError)
+        }
+        if isStructural, query != nil {
+            emitError(code: .parseError,
+                      message: "--longest-monologue / --high-density cannot be combined with a query string.",
+                      agentAction: "Remove the query to run structural analysis, or remove the structural flag to run keyword search.")
+            throw ExitCode(VvxExitCode.userError)
+        }
+        if longestMonologue && highDensity {
+            emitError(code: .parseError,
+                      message: "--longest-monologue and --high-density cannot be used together.",
+                      agentAction: "Use --longest-monologue OR --high-density — not both in the same command.")
+            throw ExitCode(VvxExitCode.userError)
+        }
+        if isStructural && isProximity {
+            emitError(code: .parseError,
+                      message: "--within cannot be combined with --longest-monologue or --high-density.",
+                      agentAction: "Use --within with a keyword query, or use --longest-monologue / --high-density alone.")
+            throw ExitCode(VvxExitCode.userError)
+        }
+        if isProximity, query == nil {
+            emitError(code: .parseError,
+                      message: "--within requires a search query with explicit AND (e.g. 'AGI AND security').",
+                      agentAction: "Provide a query string with AND, e.g. vvx search \"AGI AND security\" --within 30")
+            throw ExitCode(VvxExitCode.userError)
+        }
+        if let w = within, w <= 0 {
+            emitError(code: .parseError,
+                      message: "--within must be > 0.",
+                      agentAction: "--within must be a positive number of seconds (e.g. --within 30).")
+            throw ExitCode(VvxExitCode.userError)
+        }
+        if (isStructural || isProximity), exportNle != nil {
+            emitError(code: .parseError,
+                      message: "--export-nle cannot be combined with structural or proximity flags.",
+                      agentAction: "Use a keyword query with --export-nle, or use the structural/proximity flag alone.")
+            throw ExitCode(VvxExitCode.userError)
+        }
+        if monologueGap < 0 {
+            emitError(code: .parseError,
+                      message: "--monologue-gap must be >= 0.",
+                      agentAction: "--monologue-gap must be a non-negative number of seconds (e.g. --monologue-gap 1.5).")
+            throw ExitCode(VvxExitCode.userError)
+        }
+        if densityWindow <= 0 {
+            emitError(code: .parseError,
+                      message: "--density-window must be > 0.",
+                      agentAction: "--density-window must be a positive number of seconds (e.g. --density-window 60.0).")
+            throw ExitCode(VvxExitCode.userError)
+        }
+        // --chapters-only requires a query
+        if isChaptersOnly, query == nil {
+            emitError(code: .parseError,
+                      message: "--chapters-only requires a search query.",
+                      agentAction: "Provide a query string, e.g. vvx search \"AGI safety\" --chapters-only")
+            throw ExitCode(VvxExitCode.userError)
+        }
+        // --chapters-only + structural flags
+        if isChaptersOnly, isStructural {
+            emitError(code: .parseError,
+                      message: "--chapters-only cannot be combined with --longest-monologue or --high-density.",
+                      agentAction: "Use --chapters-only OR a structural flag — not both.")
+            throw ExitCode(VvxExitCode.userError)
+        }
+        // --chapters-only + --rag
+        if isChaptersOnly, rag {
+            emitError(code: .parseError,
+                      message: "--chapters-only cannot be combined with --rag.",
+                      agentAction: "Use --chapters-only for chapter-level results, or --rag for transcript-level RAG output.")
+            throw ExitCode(VvxExitCode.userError)
+        }
+        // --chapters-only + --export-nle
+        if isChaptersOnly, exportNle != nil {
+            emitError(code: .parseError,
+                      message: "--chapters-only cannot be combined with --export-nle.",
+                      agentAction: "Use a keyword query with --export-nle, or use --chapters-only alone.")
+            throw ExitCode(VvxExitCode.userError)
+        }
+
+        // --- Branch ---------------------------------------------------------
+
+        if isChaptersOnly {
+            try await runChaptersOnlySearch()
+            return
+        }
+        if isStructural {
+            try await runStructuralSearch()
+            return
+        }
+        if isProximity {
+            try await runProximitySearch()
+            return
+        }
+
         if exportNle != nil || exportNleOut != nil {
             try await runNLEExport()
             return
         }
 
-        // --- Standard JSON / RAG branch -----------------------------------------
+        // --- Standard JSON / RAG branch -------------------------------------
+        try await runStandardFTS()
+    }
+
+    // MARK: - Structural search
+
+    private mutating func runStructuralSearch() async throws {
+        let modeName = longestMonologue ? "longest_monologue" : "high_density"
+
+        // Open DB
+        let db: VortexDB
+        do {
+            db = try VortexDB.open()
+        } catch {
+            emitError(code: .indexCorrupt,
+                      message: "Could not open vortex.db: \(error.localizedDescription)")
+            throw ExitCode(VvxExitCode.forErrorCode(.indexCorrupt))
+        }
+
+        // Load lightweight video list
+        let summaries: [VideoSummary]
+        do {
+            summaries = try await db.videoSummaries(
+                platform:  platform,
+                uploader:  uploader,
+                afterDate: after
+            )
+        } catch {
+            emitError(code: .indexCorrupt,
+                      message: "Could not query videos: \(error.localizedDescription)")
+            throw ExitCode(VvxExitCode.forErrorCode(.indexCorrupt))
+        }
+
+        fputs("Scanning \(summaries.count) video(s) for structural analysis…\n", stderr)
+
+        // Fan-out: analyse each video's blocks
+        struct ScoredResult {
+            let summary:  VideoSummary
+            let monologue: MonologueSpan?
+            let density:   DensitySpan?
+            var score: Double {
+                monologue.map(\.durationSeconds) ?? density.map(\.wordsPerSecond) ?? 0
+            }
+        }
+
+        var results: [ScoredResult] = []
+
+        for summary in summaries {
+            let blocks: [StoredBlock]
+            do {
+                blocks = try await db.blocksForVideo(videoId: summary.id)
+            } catch {
+                continue
+            }
+            guard !blocks.isEmpty else { continue }
+
+            if longestMonologue {
+                if let span = StructuralAnalyzer.longestMonologue(
+                    blocks:        blocks,
+                    maxGapSeconds: monologueGap,
+                    chapters:      summary.chapters
+                ) {
+                    results.append(ScoredResult(summary: summary, monologue: span, density: nil))
+                }
+            } else {
+                if let span = StructuralAnalyzer.highDensityWindow(
+                    blocks:        blocks,
+                    windowSeconds: densityWindow,
+                    chapters:      summary.chapters
+                ) {
+                    results.append(ScoredResult(summary: summary, monologue: nil, density: span))
+                }
+            }
+        }
+
+        // Sort descending by score (duration or words-per-second)
+        results.sort { $0.score > $1.score }
+
+        // Apply limit
+        let topResults = Array(results.prefix(limit))
+
+        // Emit per-result NDJSON
+        for (i, r) in topResults.enumerated() {
+            let rank = i + 1
+            if let span = r.monologue {
+                let startS = span.startSeconds
+                let endS   = span.endSeconds
+                let repro  = reproduceCommand(videoPath: r.summary.videoPath,
+                                              start: startS, end: endS)
+                printNDJSON(MonologueResultLine(
+                    rank:              rank,
+                    videoTitle:        r.summary.title,
+                    uploader:          r.summary.uploader,
+                    platform:          r.summary.platform,
+                    uploadDate:        r.summary.uploadDate,
+                    videoPath:         r.summary.videoPath,
+                    startSeconds:      startS,
+                    endSeconds:        endS,
+                    durationSeconds:   span.durationSeconds,
+                    blockCount:        span.blockCount,
+                    structuralScore:   span.durationSeconds,
+                    transcriptExcerpt: span.transcriptExcerpt,
+                    chapterTitle:      span.chapterTitle,
+                    chapterIndex:      span.chapterIndex,
+                    isMultiChapter:    span.isMultiChapter,
+                    reproduceCommand:  repro
+                ))
+            } else if let span = r.density {
+                let startS = span.startSeconds
+                let endS   = span.endSeconds
+                let repro  = reproduceCommand(videoPath: r.summary.videoPath,
+                                              start: startS, end: endS)
+                printNDJSON(DensityResultLine(
+                    rank:              rank,
+                    videoTitle:        r.summary.title,
+                    uploader:          r.summary.uploader,
+                    platform:          r.summary.platform,
+                    uploadDate:        r.summary.uploadDate,
+                    videoPath:         r.summary.videoPath,
+                    startSeconds:      startS,
+                    endSeconds:        endS,
+                    windowSeconds:     densityWindow,
+                    wordCount:         span.wordCount,
+                    wordsPerSecond:    span.wordsPerSecond,
+                    structuralScore:   span.wordsPerSecond,
+                    transcriptExcerpt: span.transcriptExcerpt,
+                    chapterTitle:      span.chapterTitle,
+                    chapterIndex:      span.chapterIndex,
+                    isMultiChapter:    span.isMultiChapter,
+                    reproduceCommand:  repro
+                ))
+            }
+        }
+
+        // Emit summary NDJSON
+        printNDJSON(StructuralSummaryLine(
+            mode:          modeName,
+            scannedVideos: summaries.count,
+            resultCount:   topResults.count,
+            limit:         limit,
+            uploader:      uploader,
+            platform:      platform,
+            afterDate:     after
+        ))
+
+        fputs("Found \(topResults.count) result(s) from \(summaries.count) video(s).\n", stderr)
+    }
+
+    // MARK: - Proximity search
+
+    private mutating func runProximitySearch() async throws {
+        let withinSeconds = within!   // validated > 0 by guard block
+
+        // Parse AND-separated terms (case-insensitive split, trimmed).
+        let rawTerms = (query ?? "")
+            .components(separatedBy: " AND ")
+            .map { $0.trimmingCharacters(in: .whitespacesAndNewlines) }
+            .filter { !$0.isEmpty }
+
+        guard rawTerms.count >= 2 else {
+            // Single term — no proximity possible; fall through to standard FTS.
+            fputs("Note: --within requires at least two terms joined by AND. Running standard search.\n", stderr)
+            try await runStandardFTS()
+            return
+        }
+
+        // Open DB.
+        let db: VortexDB
+        do {
+            db = try VortexDB.open()
+        } catch {
+            emitError(code: .indexCorrupt,
+                      message: "Could not open vortex.db: \(error.localizedDescription)")
+            throw ExitCode(VvxExitCode.forErrorCode(.indexCorrupt))
+        }
+
+        fputs("Running proximity search: \(rawTerms.joined(separator: " AND ")) within \(withinSeconds)s…\n", stderr)
+
+        // Per-term FTS5 sub-queries.
+        // Generous sub-query limit for proximity fan-out (scan all candidate hits per term).
+        let subLimit = max(1000, limit * 50)
+        var termHitsByVideo: [String: [String: [ProximityHit]]] = [:]
+        var videoMeta: [String: SearchHit] = [:]   // videoId → first hit (for metadata)
+
+        for term in rawTerms {
+            let hits: [SearchHit]
+            do {
+                hits = try await db.search(
+                    query:     term,
+                    platform:  platform,
+                    afterDate: after,
+                    uploader:  uploader,
+                    limit:     subLimit
+                )
+            } catch {
+                emitError(code: .indexEmpty,
+                          message: "Sub-query for term '\(term)' failed: \(error.localizedDescription)")
+                throw ExitCode(VvxExitCode.forErrorCode(.indexEmpty))
+            }
+            for hit in hits {
+                let pHit = ProximityHit(
+                    term:         term,
+                    startSeconds: hit.startSeconds,
+                    endSeconds:   hit.endSeconds,
+                    text:         hit.text
+                )
+                termHitsByVideo[hit.videoId, default: [:]][term, default: []].append(pHit)
+                if videoMeta[hit.videoId] == nil { videoMeta[hit.videoId] = hit }
+            }
+        }
+
+        // Keep only videos where ALL required terms have at least one hit.
+        let candidateVideos = termHitsByVideo.filter { $0.value.keys.count == rawTerms.count }
+
+        fputs("Found \(candidateVideos.count) video(s) with all terms present. Scanning for tightest windows…\n", stderr)
+
+        // Fan-out: find the tightest window per candidate video.
+        struct ProximityResult {
+            let videoId: String
+            let meta:    SearchHit
+            let window:  ProximityWindow
+        }
+
+        var results: [ProximityResult] = []
+
+        for (videoId, termHitsForVideo) in candidateVideos {
+            let blocks: [StoredBlock]
+            do {
+                blocks = try await db.blocksForVideo(videoId: videoId)
+            } catch {
+                continue
+            }
+            if let window = ProximityAnalyzer.minimumWindow(
+                termHits:      termHitsForVideo,
+                withinSeconds: withinSeconds,
+                blocks:        blocks
+            ), let meta = videoMeta[videoId] {
+                results.append(ProximityResult(videoId: videoId, meta: meta, window: window))
+            }
+        }
+
+        // Sort ascending by proximitySpanSeconds (tightest first), apply limit.
+        results.sort { $0.window.proximitySpanSeconds < $1.window.proximitySpanSeconds }
+        let topResults = Array(results.prefix(limit))
+
+        // Emit per-result NDJSON.
+        for (i, r) in topResults.enumerated() {
+            let rank  = i + 1
+            let win   = r.window
+            let repro = reproduceCommand(videoPath: r.meta.videoPath,
+                                         start: win.startSeconds, end: win.endSeconds)
+            printNDJSON(ProximityResultLine(
+                rank:                 rank,
+                videoTitle:           r.meta.title,
+                uploader:             r.meta.uploader,
+                platform:             r.meta.platform,
+                uploadDate:           r.meta.uploadDate,
+                videoPath:            r.meta.videoPath,
+                startSeconds:         win.startSeconds,
+                endSeconds:           win.endSeconds,
+                proximitySpanSeconds: win.proximitySpanSeconds,
+                withinSeconds:        withinSeconds,
+                terms:                rawTerms,
+                termHits:             win.termHits.map {
+                    ProximityTermHitLine(term: $0.term, startSeconds: $0.startSeconds, text: $0.text)
+                },
+                structuralScore:      win.proximitySpanSeconds,
+                transcriptExcerpt:    win.transcriptExcerpt,
+                reproduceCommand:     repro
+            ))
+        }
+
+        // Emit summary NDJSON.
+        let noWindowNote = topResults.isEmpty && !candidateVideos.isEmpty
+        if noWindowNote {
+            fputs("No videos had all terms within \(withinSeconds)s. Try a larger --within value.\n", stderr)
+        }
+        printNDJSON(ProximitySummaryLine(
+            terms:           rawTerms,
+            withinSeconds:   withinSeconds,
+            candidateVideos: candidateVideos.count,
+            resultCount:     topResults.count,
+            limit:           limit,
+            uploader:        uploader,
+            platform:        platform,
+            afterDate:       after
+        ))
+
+        fputs("Found \(topResults.count) proximity window(s) across \(candidateVideos.count) candidate video(s).\n", stderr)
+    }
+
+    // MARK: - Chapters-only search
+
+    private mutating func runChaptersOnlySearch() async throws {
+        let terms = (query ?? "")
+            .split(separator: " ")
+            .map(String.init)
+            .filter { !$0.isEmpty }
+
+        // Open DB.
+        let db: VortexDB
+        do {
+            db = try VortexDB.open()
+        } catch {
+            emitError(code: .indexCorrupt,
+                      message: "Could not open vortex.db: \(error.localizedDescription)")
+            throw ExitCode(VvxExitCode.forErrorCode(.indexCorrupt))
+        }
+
+        let summaries: [VideoSummary]
+        do {
+            summaries = try await db.videoSummaries(
+                platform:  platform,
+                uploader:  uploader,
+                afterDate: after
+            )
+        } catch {
+            emitError(code: .indexCorrupt,
+                      message: "Could not query videos: \(error.localizedDescription)")
+            throw ExitCode(VvxExitCode.forErrorCode(.indexCorrupt))
+        }
+
+        fputs("Scanning \(summaries.count) video(s) for chapter title matches…\n", stderr)
+
+        // Check if any videos have chapters at all.
+        let videosWithChapters = summaries.filter { !$0.chapters.isEmpty }
+        if videosWithChapters.isEmpty {
+            fputs("No videos in this selection have chapter data. Ensure videos were fetched with yt-dlp and that the source includes creator chapters.\n", stderr)
+            printNDJSON(ChaptersOnlySummaryLine(
+                query:          query ?? "",
+                terms:          terms,
+                scannedVideos:  summaries.count,
+                matchedChapters: 0,
+                resultCount:    0,
+                limit:          limit,
+                uploader:       uploader,
+                platform:       platform,
+                afterDate:      after
+            ))
+            return
+        }
+
+        // Collect matching chapters (AND semantics: all terms must appear in title).
+        struct ChapterMatch {
+            let summary:      VideoSummary
+            let chapter:      VideoChapter
+            let chapterIndex: Int
+            let termCount:    Int
+        }
+
+        var matches: [ChapterMatch] = []
+        for summary in summaries {
+            for (idx, chapter) in summary.chapters.enumerated() {
+                let lowerTitle = chapter.title.lowercased()
+                let matchedTerms = terms.filter { lowerTitle.contains($0.lowercased()) }
+                if matchedTerms.count == terms.count {
+                    matches.append(ChapterMatch(
+                        summary:      summary,
+                        chapter:      chapter,
+                        chapterIndex: idx,
+                        termCount:    matchedTerms.count
+                    ))
+                }
+            }
+        }
+
+        let totalMatched = matches.count
+
+        if matches.isEmpty {
+            fputs("No chapter titles matched \"\(query!)\". Try broader terms or use vvx search for transcript-level matching.\n", stderr)
+            printNDJSON(ChaptersOnlySummaryLine(
+                query:           query ?? "",
+                terms:           terms,
+                scannedVideos:   summaries.count,
+                matchedChapters: 0,
+                resultCount:     0,
+                limit:           limit,
+                uploader:        uploader,
+                platform:        platform,
+                afterDate:       after
+            ))
+            return
+        }
+
+        // Sort: most terms matched first; within a video, chronological; cross-video stable.
+        matches.sort {
+            if $0.termCount != $1.termCount { return $0.termCount > $1.termCount }
+            if $0.summary.id == $1.summary.id { return $0.chapter.startTime < $1.chapter.startTime }
+            return false
+        }
+
+        // Apply limit.
+        let topMatches = Array(matches.prefix(limit))
+
+        // Load blocks lazily — only for videos appearing in topMatches.
+        let matchedVideoIds = Set(topMatches.map(\.summary.id))
+        var blocksByVideoId: [String: [StoredBlock]] = [:]
+        for videoId in matchedVideoIds {
+            blocksByVideoId[videoId] = (try? await db.blocksForVideo(videoId: videoId)) ?? []
+        }
+
+        // Emit per-result NDJSON.
+        for (i, m) in topMatches.enumerated() {
+            let rank      = i + 1
+            let startSecs = m.chapter.startTime
+            let blocks    = blocksByVideoId[m.summary.id] ?? []
+            // endTime: use next chapter start if available, or video duration, or nil.
+            let endSecs: Double?
+            let chapters  = m.summary.chapters
+            if m.chapterIndex + 1 < chapters.count {
+                endSecs = chapters[m.chapterIndex + 1].startTime
+            } else if let dur = m.summary.durationSeconds {
+                endSecs = Double(dur)
+            } else {
+                endSecs = nil
+            }
+
+            let excerpt   = chapterExcerpt(blocks: blocks, startTime: startSecs, endTime: endSecs)
+            let duration: Double? = endSecs.map { $0 - startSecs }
+            let repro: String
+            if let path = m.summary.videoPath, let endS = endSecs {
+                repro = "vvx clip \"\(path)\" --start \(startSecs) --end \(endS)"
+            } else {
+                repro = ""
+            }
+
+            printNDJSON(ChaptersOnlyResultLine(
+                rank:             rank,
+                videoId:          m.summary.id,
+                videoTitle:       m.summary.title,
+                uploader:         m.summary.uploader,
+                platform:         m.summary.platform,
+                uploadDate:       m.summary.uploadDate,
+                videoPath:        m.summary.videoPath,
+                chapterTitle:     m.chapter.title,
+                chapterIndex:     m.chapterIndex,
+                startSeconds:     startSecs,
+                endSeconds:       endSecs,
+                durationSeconds:  duration,
+                transcriptExcerpt: excerpt,
+                reproduceCommand: repro
+            ))
+        }
+
+        // Emit summary NDJSON.
+        printNDJSON(ChaptersOnlySummaryLine(
+            query:           query ?? "",
+            terms:           terms,
+            scannedVideos:   summaries.count,
+            matchedChapters: totalMatched,
+            resultCount:     topMatches.count,
+            limit:           limit,
+            uploader:        uploader,
+            platform:        platform,
+            afterDate:       after
+        ))
+
+        fputs("Found \(topMatches.count) chapter match(es) across \(matchedVideoIds.count) video(s).\n", stderr)
+    }
+
+    // MARK: - Standard FTS (shared by proximity fallback)
+
+    private mutating func runStandardFTS() async throws {
         guard maxTokens == nil || rag else {
             printNDJSON(SearchErrorEnvelope(
-                query: query,
+                query: query ?? "",
                 message: "--max-tokens requires --rag."
             ))
             throw ExitCode(VvxExitCode.userError)
@@ -127,7 +749,7 @@ struct SearchCommand: AsyncParsableCommand {
             db = try VortexDB.open()
         } catch {
             let envelope = SearchErrorEnvelope(
-                query:   query,
+                query:   query ?? "",
                 message: "Could not open vortex.db: \(error.localizedDescription)"
             )
             printNDJSON(envelope)
@@ -137,7 +759,7 @@ struct SearchCommand: AsyncParsableCommand {
         let output: SearchOutput
         do {
             output = try await SRTSearcher.search(
-                query:     query,
+                query:     query ?? "",
                 db:        db,
                 platform:  platform,
                 afterDate: after,
@@ -146,7 +768,7 @@ struct SearchCommand: AsyncParsableCommand {
             )
         } catch {
             let envelope = SearchErrorEnvelope(
-                query:   query,
+                query:   query ?? "",
                 message: "Search failed: \(error.localizedDescription)"
             )
             printNDJSON(envelope)
@@ -157,7 +779,7 @@ struct SearchCommand: AsyncParsableCommand {
 
         if rag {
             let markdown = SRTSearcher.ragMarkdown(
-                query:              query,
+                query:              query ?? "",
                 results:            output.results,
                 totalBeforeBudget:  output.totalMatches,
                 maxTokens:          maxTokens,
@@ -214,7 +836,7 @@ struct SearchCommand: AsyncParsableCommand {
         let hits: [SearchHit]
         do {
             hits = try await db.search(
-                query:     query,
+                query:     query ?? "",
                 platform:  platform,
                 afterDate: after,
                 uploader:  uploader,
@@ -229,7 +851,7 @@ struct SearchCommand: AsyncParsableCommand {
         // 5 — Zero hits
         if hits.isEmpty {
             fputs("No results matching criteria.\n", stderr)
-            printNDJSON(NleEmptySummary(query: query))
+            printNDJSON(NleEmptySummary(query: query ?? ""))
             return
         }
 
@@ -284,7 +906,7 @@ struct SearchCommand: AsyncParsableCommand {
                 plannedClipCount:          clippable.count,
                 plannedSkipCount:          skipCount,
                 plannedTotalDurationSeconds: plannedDur,
-                query:                     query
+                query:                     query ?? ""
             ))
             fputs("Dry run: \(clippable.count) clip(s) planned (\(skipCount) would be skipped).\n", stderr)
             return
@@ -317,13 +939,11 @@ struct SearchCommand: AsyncParsableCommand {
             let id      = GatherPathNaming.paddedClipIndex(i + 1, total: total)
             let srcPath = hit.videoPath!
 
-            // Chapter title when the hit has chapter metadata
             let chapterTitle: String? = hit.chapterIndex.flatMap { idx in
                 guard idx >= 0, idx < hit.chapters.count else { return nil }
                 return hit.chapters[idx].title
             }
 
-            // Reproduce command
             var repro = "vvx clip \"\(srcPath)\" --start \(rc.resolvedStartSeconds) --end \(rc.resolvedEndSeconds) --pad \(pad)"
             if snap != .off { repro += " --snap \(snap.rawValue)" }
 
@@ -344,7 +964,7 @@ struct SearchCommand: AsyncParsableCommand {
 
         // 11 — Build NLETimeline
         let timeline = NLETimeline(
-            title:     query,
+            title:     query ?? "",
             frameRate: frameRate,
             clips:     nleClips
         )
@@ -384,7 +1004,7 @@ struct SearchCommand: AsyncParsableCommand {
         }
 
         // 13 — Build reproduce command for summary
-        var reproduceCmd = "vvx search \"\(query)\" --export-nle \(format.rawValue) --export-nle-out \(outPath) --pad \(pad) --limit \(limit)"
+        var reproduceCmd = "vvx search \"\(query ?? "")\" --export-nle \(format.rawValue) --export-nle-out \(outPath) --pad \(pad) --limit \(limit)"
         if let p = platform { reproduceCmd += " --platform \"\(p)\"" }
         if let a = after    { reproduceCmd += " --after \(a)" }
         if let u = uploader { reproduceCmd += " --uploader \"\(u)\"" }
@@ -399,7 +1019,7 @@ struct SearchCommand: AsyncParsableCommand {
             clipCount:            nleClips.count,
             skippedCount:         skipCount,
             totalDurationSeconds: totalDuration,
-            query:                query,
+            query:                query ?? "",
             padSeconds:           pad,
             reproduceCommand:     reproduceCmd
         ))
@@ -416,11 +1036,148 @@ struct SearchCommand: AsyncParsableCommand {
         return (expanded as NSString).standardizingPath
     }
 
+    private func reproduceCommand(videoPath: String?, start: Double, end: Double) -> String {
+        guard let path = videoPath else { return "" }
+        return "vvx clip \"\(path)\" --start \(start) --end \(end)"
+    }
+
     private func emitError(code: VvxErrorCode, message: String, agentAction: String? = nil) {
         let env = VvxErrorEnvelope(error: VvxError(code: code, message: message,
                                                     agentAction: agentAction))
         print(env.jsonString())
     }
+}
+
+// MARK: - Structural search NDJSON models (CLI layer only)
+
+private struct MonologueResultLine: Encodable {
+    let success           = true
+    let mode              = "longest_monologue"
+    let rank:              Int
+    let videoTitle:        String
+    let uploader:          String?
+    let platform:          String?
+    let uploadDate:        String?
+    let videoPath:         String?
+    let startSeconds:      Double
+    let endSeconds:        Double
+    let durationSeconds:   Double
+    let blockCount:        Int
+    let structuralScore:   Double
+    let transcriptExcerpt: String
+    let chapterTitle:      String?
+    let chapterIndex:      Int?
+    let isMultiChapter:    Bool
+    let reproduceCommand:  String
+}
+
+private struct DensityResultLine: Encodable {
+    let success           = true
+    let mode              = "high_density"
+    let rank:              Int
+    let videoTitle:        String
+    let uploader:          String?
+    let platform:          String?
+    let uploadDate:        String?
+    let videoPath:         String?
+    let startSeconds:      Double
+    let endSeconds:        Double
+    let windowSeconds:     Double
+    let wordCount:         Int
+    let wordsPerSecond:    Double
+    let structuralScore:   Double
+    let transcriptExcerpt: String
+    let chapterTitle:      String?
+    let chapterIndex:      Int?
+    let isMultiChapter:    Bool
+    let reproduceCommand:  String
+}
+
+private struct StructuralSummaryLine: Encodable {
+    let success       = true
+    let mode:          String
+    let scannedVideos: Int
+    let resultCount:   Int
+    let limit:         Int
+    let uploader:      String?
+    let platform:      String?
+    let afterDate:     String?
+}
+
+// MARK: - Proximity search NDJSON models (CLI layer only)
+
+private struct ProximityTermHitLine: Encodable {
+    let term:         String
+    let startSeconds: Double
+    let text:         String
+}
+
+private struct ProximityResultLine: Encodable {
+    let success              = true
+    let mode                 = "proximity"
+    let rank:                 Int
+    let videoTitle:           String
+    let uploader:             String?
+    let platform:             String?
+    let uploadDate:           String?
+    let videoPath:            String?
+    let startSeconds:         Double
+    let endSeconds:           Double
+    let proximitySpanSeconds: Double
+    let withinSeconds:        Double
+    let terms:                [String]
+    let termHits:             [ProximityTermHitLine]
+    let structuralScore:      Double
+    let transcriptExcerpt:    String
+    let reproduceCommand:     String
+}
+
+private struct ProximitySummaryLine: Encodable {
+    let success         = true
+    let mode            = "proximity"
+    let terms:           [String]
+    let withinSeconds:   Double
+    let candidateVideos: Int
+    let resultCount:     Int
+    let limit:           Int
+    let uploader:        String?
+    let platform:        String?
+    let afterDate:       String?
+}
+
+// MARK: - Chapters-only search NDJSON models (CLI layer only)
+
+private struct ChaptersOnlyResultLine: Encodable {
+    let success           = true
+    let mode              = "chapters_only"
+    let rank:              Int
+    let videoId:           String
+    let videoTitle:        String
+    let uploader:          String?
+    let platform:          String?
+    let uploadDate:        String?
+    let videoPath:         String?
+    let chapterTitle:      String
+    let chapterIndex:      Int
+    let startSeconds:      Double
+    let endSeconds:        Double?
+    let durationSeconds:   Double?
+    let transcriptExcerpt: String
+    let reproduceCommand:  String
+}
+
+private struct ChaptersOnlySummaryLine: Encodable {
+    let success          = true
+    let mode             = "chapters_only"
+    let query:            String
+    let terms:            [String]
+    let scannedVideos:    Int
+    let matchedChapters:  Int
+    let resultCount:      Int
+    let limit:            Int
+    let uploader:         String?
+    let platform:         String?
+    let afterDate:        String?
 }
 
 // MARK: - NDJSON models (NLE export — CLI layer only)
@@ -488,6 +1245,23 @@ private struct SearchErrorEnvelope: Codable {
               let str  = String(data: data, encoding: .utf8) else { return "{}" }
         return str
     }
+}
+
+// MARK: - Chapter excerpt helper
+
+/// Extract up to `maxChars` characters of transcript text for a chapter.
+/// Includes blocks whose startSeconds falls within [startTime - 0.5, endTime + 0.5].
+private func chapterExcerpt(
+    blocks:    [StoredBlock],
+    startTime: Double,
+    endTime:   Double?,
+    maxChars:  Int = 1000
+) -> String {
+    let upper = endTime.map { $0 + 0.5 } ?? Double.infinity
+    let inChapter = blocks.filter {
+        $0.startSeconds >= startTime - 0.5 && $0.startSeconds <= upper
+    }
+    return String(inChapter.map(\.text).joined(separator: " ").prefix(maxChars))
 }
 
 // MARK: - Helpers

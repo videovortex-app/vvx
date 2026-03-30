@@ -85,6 +85,8 @@ public struct SearchHit: Sendable {
     public let startTime: String        // "00:14:32,000"
     public let endTime: String
     public let startSeconds: Double
+    /// Derived from `end_time` SRT timestamp at query time.
+    public let endSeconds: Double
     public let text: String             // matched block text
     public let relevanceScore: Double   // bm25() — lower (more negative) = more relevant
     // Resolved from the `videos` table in the same query JOIN.
@@ -122,7 +124,50 @@ public struct StoredBlock: Sendable, Equatable {
     public let startTime: String
     public let endTime: String
     public let startSeconds: Double
+    /// Derived from `end_time` SRT timestamp at load time (seconds since video start).
+    public let endSeconds: Double
     public let text: String
+    /// Zero-based index into the parent video's `chapters` array.
+    /// `nil` when the block precedes all chapter markers, or when `vvx reindex` has not been run.
+    public let chapterIndex: Int?
+
+    public init(
+        startTime:    String,
+        endTime:      String,
+        startSeconds: Double,
+        endSeconds:   Double,
+        text:         String,
+        chapterIndex: Int? = nil
+    ) {
+        self.startTime    = startTime
+        self.endTime      = endTime
+        self.startSeconds = startSeconds
+        self.endSeconds   = endSeconds
+        self.text         = text
+        self.chapterIndex = chapterIndex
+    }
+}
+
+/// Lightweight video row for structural analysis fan-out.
+///
+/// Contains only metadata — no transcript blocks.
+/// Returned by `VortexDB.videoSummaries(platform:uploader:afterDate:)`.
+public struct VideoSummary: Sendable {
+    public let id:              String
+    public let title:           String
+    public let uploader:        String?
+    public let platform:        String?
+    public let uploadDate:      String?
+    public let videoPath:       String?
+    public let durationSeconds: Int?
+    /// Chapter markers from the video creator, decoded from the `chapters` JSON blob.
+    public let chapters:        [VideoChapter]
+    /// View count at index time. `nil` when not scraped.
+    public let viewCount:       Int?
+    /// Like count at index time. `nil` when not scraped or platform does not expose it.
+    public let likeCount:       Int?
+    /// Comment count at index time. `nil` when not scraped or platform does not expose it.
+    public let commentCount:    Int?
 }
 
 // MARK: - Errors
@@ -730,14 +775,16 @@ public actor VortexDB {
 
             var hits: [SearchHit] = []
             while sqlite3_step(stmt) == SQLITE_ROW {
+                let endTimeStr = dbColumnText(stmt, 5) ?? ""
                 hits.append(SearchHit(
                     videoId:              dbColumnText(stmt, 0) ?? "",
                     title:                dbColumnText(stmt, 1) ?? "",
                     platform:             dbColumnText(stmt, 2),
                     uploader:             dbColumnText(stmt, 3),
                     startTime:            dbColumnText(stmt, 4) ?? "",
-                    endTime:              dbColumnText(stmt, 5) ?? "",
+                    endTime:              endTimeStr,
                     startSeconds:         Double(dbColumnText(stmt, 6) ?? "0") ?? 0,
+                    endSeconds:           srtTimestampToSeconds(endTimeStr),
                     text:                 dbColumnText(stmt, 7) ?? "",
                     relevanceScore:       sqlite3_column_double(stmt, 8),
                     videoPath:            dbColumnText(stmt, 9),
@@ -763,7 +810,7 @@ public actor VortexDB {
     /// each search hit without re-reading the SRT file from disk.
     public func blocksForVideo(videoId: String) throws -> [StoredBlock] {
         let sql = """
-            SELECT start_time, end_time, start_seconds, text
+            SELECT start_time, end_time, start_seconds, chapter_index, text
             FROM transcript_blocks
             WHERE video_id = ?
             ORDER BY CAST(start_seconds AS REAL);
@@ -772,11 +819,14 @@ public actor VortexDB {
             sqlite3_bind_text(stmt, 1, videoId, -1, SQLITE_TRANSIENT)
             var blocks: [StoredBlock] = []
             while sqlite3_step(stmt) == SQLITE_ROW {
+                let endTimeStr = dbColumnText(stmt, 1) ?? ""
                 blocks.append(StoredBlock(
                     startTime:    dbColumnText(stmt, 0) ?? "",
-                    endTime:      dbColumnText(stmt, 1) ?? "",
+                    endTime:      endTimeStr,
                     startSeconds: Double(dbColumnText(stmt, 2) ?? "0") ?? 0,
-                    text:         dbColumnText(stmt, 3) ?? ""
+                    endSeconds:   srtTimestampToSeconds(endTimeStr),
+                    text:         dbColumnText(stmt, 4) ?? "",
+                    chapterIndex: dbColumnOptInt(stmt, 3)
                 ))
             }
             return blocks
@@ -846,6 +896,56 @@ public actor VortexDB {
     /// Returns the current schema version (used in tests and doctor checks).
     public func schemaVersion() throws -> Int {
         dbQueryInt(db, "SELECT version FROM schema_version LIMIT 1;") ?? 0
+    }
+
+    // MARK: - Read: structural analysis fan-out
+
+    /// Lightweight listing of all videos matching optional filters, ordered newest-sensed first.
+    ///
+    /// Intended for structural analysis fan-out in `vvx search --longest-monologue` /
+    /// `--high-density`: call this once to get video identifiers, then call
+    /// `blocksForVideo(videoId:)` for each returned `id`.  No transcript blocks are loaded.
+    ///
+    /// - Parameters:
+    ///   - platform:  Optional exact-match filter on `platform`.
+    ///   - uploader:  Optional exact-match filter on `uploader`.
+    ///   - afterDate: ISO 8601 date string; only videos with `upload_date >= afterDate`.
+    public func videoSummaries(
+        platform:  String? = nil,
+        uploader:  String? = nil,
+        afterDate: String? = nil
+    ) throws -> [VideoSummary] {
+        let sql = """
+            SELECT id, title, uploader, platform, upload_date, video_path, duration_seconds,
+                   chapters, view_count, like_count, comment_count
+            FROM videos
+            WHERE (?1 IS NULL OR platform    = ?1)
+              AND (?2 IS NULL OR uploader    = ?2)
+              AND (?3 IS NULL OR upload_date >= ?3)
+            ORDER BY sensed_at DESC;
+            """
+        return try dbPrepare(db, sql) { stmt in
+            dbBindOptText(stmt, 1, platform)
+            dbBindOptText(stmt, 2, uploader)
+            dbBindOptText(stmt, 3, afterDate)
+            var rows: [VideoSummary] = []
+            while sqlite3_step(stmt) == SQLITE_ROW {
+                rows.append(VideoSummary(
+                    id:              dbColumnText(stmt, 0) ?? "",
+                    title:           dbColumnText(stmt, 1) ?? "",
+                    uploader:        dbColumnText(stmt, 2),
+                    platform:        dbColumnText(stmt, 3),
+                    uploadDate:      dbColumnText(stmt, 4),
+                    videoPath:       dbColumnText(stmt, 5),
+                    durationSeconds: dbColumnOptInt(stmt, 6),
+                    chapters:        dbParseChapters(dbColumnText(stmt, 7)),
+                    viewCount:       dbColumnOptInt(stmt, 8),
+                    likeCount:       dbColumnOptInt(stmt, 9),
+                    commentCount:    dbColumnOptInt(stmt, 10)
+                ))
+            }
+            return rows
+        }
     }
 
     // MARK: - Read: library (vvx library)
@@ -986,6 +1086,17 @@ public actor VortexDB {
             }
             return SQLQueryResult(columns: columns, rows: rows)
         }
+    }
+
+    // MARK: - Private helpers
+
+    /// Convert an SRT-style timestamp (`HH:MM:SS,mmm` or `HH:MM:SS.mmm`) to seconds.
+    ///
+    /// Normalises the SRT comma-separator to a dot before delegating to `TimeParser`.
+    /// Returns 0.0 for unparseable input rather than crashing.
+    func srtTimestampToSeconds(_ ts: String) -> Double {
+        let normalised = ts.replacingOccurrences(of: ",", with: ".")
+        return TimeParser.parseToSeconds(normalised) ?? 0.0
     }
 
     /// Return `CREATE TABLE` / `CREATE VIRTUAL TABLE` SQL for all tables in the database.

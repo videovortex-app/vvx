@@ -32,7 +32,7 @@ struct DocsCommand: AsyncParsableCommand {
 
     // MARK: - Arguments & flags
 
-    @Argument(help: "Show docs for a specific command: sense, fetch, search, sync, clip, library, sql, reindex, doctor, engine")
+    @Argument(help: "Show docs for a specific command: sense, fetch, search, gather, sync, clip, library, sql, reindex, doctor, engine")
     var topic: String?
 
     @Flag(name: .long, help: "Print error codes and agentAction recovery table only.")
@@ -64,6 +64,7 @@ struct DocsCommand: AsyncParsableCommand {
             case "sense":                    print(senseSection)
             case "fetch":                    print(fetchSection)
             case "search":                   print(searchSection)
+            case "gather":                   print(gatherSection)
             case "sync":                     print(syncSection)
             case "clip":                     print(clipSection)
             case "library", "lib":           print(librarySection)
@@ -74,7 +75,7 @@ struct DocsCommand: AsyncParsableCommand {
             case "errors", "error":          print(errorsSection)
             case "examples", "ex":           print(examplesSection)
             default:
-                fputs("Unknown topic '\(t)'. Valid topics: sense, fetch, search, sync, clip, library, sql, reindex, doctor, engine, errors, examples\n", stderr)
+                fputs("Unknown topic '\(t)'. Valid topics: sense, fetch, search, gather, sync, clip, library, sql, reindex, doctor, engine, errors, examples\n", stderr)
                 throw ExitCode.failure
             }
             return
@@ -100,6 +101,8 @@ private extension DocsCommand {
         \(fetchSection)
 
         \(searchSection)
+
+        \(gatherSection)
 
         \(syncSection)
 
@@ -277,13 +280,13 @@ private extension DocsCommand {
 private extension DocsCommand {
     var searchSection: String {
         """
-        ## search — Full-text search across indexed transcripts
+        ## search — Full-text and structural search across indexed transcripts
 
         Searches the FTS5 transcript index in `vortex.db`. Returns ranked hits with
         surrounding context. Requires at least one video to be indexed first (via `sense`,
         `fetch`, or `sync`).
 
-        ### Usage
+        ### Usage — keyword search
         ```
         vvx search "query"
         vvx search "query" --rag                        # structured Markdown for direct answer
@@ -291,7 +294,7 @@ private extension DocsCommand {
         vvx search "\\"exact phrase\\""                 # phrase search
         vvx search "intell*"                            # prefix search
         vvx search "query" --max-tokens 5000            # token-budget cap for --rag output
-        vvx search "query" --limit 20                   # max hits (default: 10)
+        vvx search "query" --limit 20                   # max hits (default: 50)
         vvx search "query" --platform YouTube           # filter by platform
         vvx search "query" --after 2026-01-01           # filter by upload date
         vvx search "query" --uploader "Channel Name"    # filter by uploader
@@ -361,13 +364,338 @@ private extension DocsCommand {
         Clips with no local archive file are skipped (emit `NleSkipEntry` NDJSON + stderr warning).
         Run `vvx fetch "<url>" --archive` to download missing source videos, then retry.
 
+        ### Structural search (no query required)
+
+        Deterministic transcript structure analysis — no LLM, no network, no cloud.
+        Operates on existing `transcript_blocks` data only. Free tier (no Pro gate).
+
+        #### `--longest-monologue`
+        Finds the single longest contiguous speech span per video, ranked by duration descending.
+        Two consecutive blocks are merged when the gap between them ≤ `--monologue-gap`.
+
+        ```
+        vvx search --longest-monologue
+        vvx search --longest-monologue --uploader "Lex Fridman"
+        vvx search --longest-monologue --platform YouTube --limit 5
+        vvx search --longest-monologue --monologue-gap 3.0 --after 2025-01-01
+        ```
+
+        | Flag | Default | Description |
+        |------|---------|-------------|
+        | `--monologue-gap <seconds>` | `1.5` | Max silence gap in seconds still counted as the same span. |
+
+        NDJSON output per result (one line per video):
+        ```json
+        {
+          "success": true,
+          "mode": "longest_monologue",
+          "rank": 1,
+          "videoTitle": "Lex Fridman Podcast #400",
+          "uploader": "Lex Fridman",
+          "platform": "YouTube",
+          "uploadDate": "2026-01-15",
+          "videoPath": "/abs/path/to/video.mp4",
+          "startSeconds": 1432.5,
+          "endSeconds": 1874.0,
+          "durationSeconds": 441.5,
+          "blockCount": 87,
+          "structuralScore": 441.5,
+          "transcriptExcerpt": "...first ~1000 chars of span text...",
+          "reproduceCommand": "vvx clip \\"/abs/path/video.mp4\\" --start 1432.5 --end 1874.0"
+        }
+        ```
+        Final summary line:
+        ```json
+        {"success":true,"mode":"longest_monologue","scannedVideos":42,"resultCount":5,"limit":5,"uploader":"Lex Fridman","platform":null,"afterDate":null}
+        ```
+
+        #### `--high-density`
+        Finds the highest words-per-second window per video using a two-pointer sliding window.
+        Score = `wordCount / windowSeconds`. Ranked by `wordsPerSecond` descending.
+
+        ```
+        vvx search --high-density
+        vvx search --high-density --density-window 30
+        vvx search --high-density --uploader "Joe Rogan" --limit 10
+        vvx search --high-density --platform YouTube --density-window 45 --after 2025-01-01
+        ```
+
+        | Flag | Default | Description |
+        |------|---------|-------------|
+        | `--density-window <seconds>` | `60.0` | Sliding window width. Use `30` for tight highlight-reel clips. |
+
+        NDJSON output per result (one line per video):
+        ```json
+        {
+          "success": true,
+          "mode": "high_density",
+          "rank": 1,
+          "videoTitle": "Joe Rogan Experience #2100",
+          "uploader": "PowerfulJRE",
+          "platform": "YouTube",
+          "uploadDate": "2026-02-01",
+          "videoPath": "/abs/path/to/video.mp4",
+          "startSeconds": 3220.0,
+          "endSeconds": 3280.0,
+          "windowSeconds": 60.0,
+          "wordCount": 412,
+          "wordsPerSecond": 6.87,
+          "structuralScore": 6.87,
+          "transcriptExcerpt": "...first ~1000 chars of window text...",
+          "reproduceCommand": "vvx clip \\"/abs/path/video.mp4\\" --start 3220.0 --end 3280.0"
+        }
+        ```
+
+        Both structural modes now include chapter context on every result (when chapter data
+        is present on the video):
+        - `chapterTitle`: title of the chapter the span/window begins in (null if no chapters).
+        - `chapterIndex`: zero-based index into the video's chapters array.
+        - `isMultiChapter`: true when the span crosses a chapter boundary.
+
+        #### Structural search mutual-exclusion rules
+        - `--longest-monologue` and `--high-density` cannot be combined.
+        - Neither flag can be combined with a query string.
+        - Neither flag can be combined with `--export-nle`, `--within`, or `--chapters-only`.
+        - `--rag` cannot be used with structural flags.
+        - `--uploader`, `--platform`, `--after`, and `--limit` are compatible with both flags.
+
+        #### `structuralScore` field
+        A unified float for sorting/filtering in agent pipelines.
+        - `longest_monologue`: span duration in seconds (higher = longer).
+        - `high_density`: words per second (higher = denser).
+        - `proximity`: `proximitySpanSeconds` — **lower is better** (tighter collision).
+          Results are pre-sorted correctly; agents do not need to re-sort.
+
+        ### Chapter search (`--chapters-only`)
+
+        Search chapter titles instead of transcript text. Returns one result per chapter whose
+        title matches all query terms (case-insensitive AND semantics — all terms must match).
+
+        ```
+        vvx search "AGI safety" --chapters-only
+        vvx search "nuclear energy" --chapters-only --uploader "Lex Fridman"
+        vvx search "mars" --chapters-only --platform YouTube --limit 10
+        vvx search "robotics" --chapters-only --after 2024-01-01
+        ```
+
+        NDJSON output per result (one line per matching chapter):
+        ```json
+        {
+          "success": true,
+          "mode": "chapters_only",
+          "rank": 1,
+          "videoId": "https://www.youtube.com/watch?v=xyz",
+          "videoTitle": "Lex Fridman — Episode 400",
+          "uploader": "Lex Fridman",
+          "platform": "YouTube",
+          "uploadDate": "2024-11-15",
+          "videoPath": "/abs/path/to/video.mp4",
+          "chapterTitle": "The AGI Debate",
+          "chapterIndex": 3,
+          "startSeconds": 4800.0,
+          "endSeconds": 5760.0,
+          "durationSeconds": 960.0,
+          "transcriptExcerpt": "...first ~1000 chars of chapter transcript...",
+          "reproduceCommand": "vvx clip \\"/abs/path/video.mp4\\" --start 4800.0 --end 5760.0"
+        }
+        ```
+        Final summary line:
+        ```json
+        {"success":true,"mode":"chapters_only","query":"AGI safety","terms":["AGI","safety"],"scannedVideos":47,"matchedChapters":8,"resultCount":5,"limit":5,"uploader":null,"platform":null,"afterDate":null}
+        ```
+
+        #### `--chapters-only` mutual-exclusion rules
+        - Requires a query string.
+        - Cannot be combined with `--longest-monologue`, `--high-density`, `--rag`, `--export-nle`.
+        - `--uploader`, `--platform`, `--after`, and `--limit` are compatible.
+
+        Note: Chapter data requires that yt-dlp reported chapters when the video was fetched.
+        If no results appear, run `vvx library <videoId>` to inspect `chapters` or re-sense.
+
+        ### Proximity search (explicit AND required)
+
+        Finds the tightest temporal collision between multiple concepts — sorted by
+        `proximitySpanSeconds` ascending (smallest window first). Plain boolean search tells
+        you both words appear somewhere in a 3-hour podcast; proximity tells you the exact
+        22-second moment they meet.
+
+        Requires a query with explicit `AND`. Space-separated terms (e.g. `"Lex Fridman"`)
+        run normal FTS — use `AND` to enable proximity.
+
+        ```
+        vvx search "AGI AND security" --within 30
+        vvx search "Tesla AND autopilot" --within 45 --uploader "Lex Fridman"
+        vvx search "neuralink AND FDA" --within 60 --after 2024-01-01 --limit 10
+        ```
+
+        | Flag | Description |
+        |------|-------------|
+        | `--within <seconds>` | Maximum proximity window in seconds. Must be > 0. |
+
+        NDJSON output per result (one line per video, sorted by tightest window first):
+        ```json
+        {
+          "success": true,
+          "mode": "proximity",
+          "rank": 1,
+          "videoTitle": "Lex Fridman Podcast #400",
+          "uploader": "Lex Fridman",
+          "platform": "YouTube",
+          "uploadDate": "2024-11-15",
+          "videoPath": "/abs/path/to/video.mp4",
+          "startSeconds": 1823.4,
+          "endSeconds": 1847.9,
+          "proximitySpanSeconds": 22.1,
+          "withinSeconds": 30.0,
+          "terms": ["AGI", "security"],
+          "termHits": [
+            { "term": "AGI", "startSeconds": 1823.4, "text": "the trajectory of AGI development..." },
+            { "term": "security", "startSeconds": 1845.5, "text": "national security implications..." }
+          ],
+          "structuralScore": 22.1,
+          "transcriptExcerpt": "...first ~1000 chars spanning the window...",
+          "reproduceCommand": "vvx clip \\"/abs/path/video.mp4\\" --start 1823.4 --end 1847.9"
+        }
+        ```
+        Final summary line:
+        ```json
+        {"success":true,"mode":"proximity","terms":["AGI","security"],"withinSeconds":30.0,"candidateVideos":12,"resultCount":5,"limit":10,"uploader":null,"platform":null,"afterDate":null}
+        ```
+
+        #### Proximity search mutual-exclusion rules
+        - `--within` requires a query with explicit `AND` (at least 2 terms).
+        - `--within` cannot be combined with `--longest-monologue` or `--high-density`.
+        - `--within` cannot be combined with `--export-nle`.
+        - `--within` without a query is a parse error.
+        - `--within 0` or negative values are parse errors.
+        - Single-term `AND` query (e.g. `"AGI"`) with `--within`: stderr note, falls through to standard FTS.
+
+        #### Why proximity beats FTS5 NEAR
+        FTS5 `NEAR` operates within a **single SRT block** (~3–5 s). If "AGI" ends block N
+        and "security" starts block N+1, `NEAR` misses the collision. The `--within` sweep
+        is the only mathematically sound tool for cross-block temporal proximity.
+
         ### Agent rules for search
         - Use `--rag` when generating a user-facing answer from transcript content.
         - Use JSON output when chaining into `clip` — extract `videoPath`, `timestamp`,
           and `timestampEnd` from each hit.
+        - Use `--longest-monologue` to find the best long-form rant or deep dive.
+        - Use `--high-density` to find the moment a speaker hammers a topic hardest.
+        - Use `--within` to find where two or more concepts collide in time — this is the
+          goldilocks zone between phrase matching (too brittle) and boolean (too noisy).
+        - Use `--chapters-only` when the user asks about topics by chapter/section name —
+          e.g. "find episodes with a chapter about AGI safety." Chapter search is faster
+          than transcript FTS because it skips block loading entirely.
+        - For structural and proximity results, use `reproduceCommand` to cut the clip directly.
+        - `structuralScore` polarity differs by mode: higher is better for monologue/density,
+          **lower is better for proximity** (tightest collision = smallest span).
         - `INDEX_EMPTY` error means no videos are indexed yet: run `vvx sync <url> --limit 10`.
         - For NLE export, source files must be on disk. Use `--dry-run` to check clip availability
           before writing the file.
+        """
+    }
+}
+
+// MARK: - Section: gather
+
+private extension DocsCommand {
+    var gatherSection: String {
+        """
+        ## gather — Batch extract clips matching a search query (Pro)
+
+        Searches vortex.db for the query and extracts every matching transcript segment
+        as a frame-accurate MP4 clip into an organized output folder. Each clip comes with
+        re-timed SRT subtitles, a manifest.json, and a clips.md summary.
+
+        ### Usage — standard gather
+        ```
+        vvx gather "query" --limit 20
+        vvx gather "query" --uploader "Channel Name" --limit 10
+        vvx gather "query" --platform YouTube --after 2024-01-01
+        vvx gather "query" --snap chapter --limit 5        # clip full chapter spans
+        vvx gather "query" --min-views 1000000             # engagement filter
+        vvx gather "query" --dry-run                       # plan without extracting
+        vvx gather "query" --fast                          # keyframe seek (instant, ±5s)
+        vvx gather "query" --exact                         # re-encode for precision
+        vvx gather "query" --max-total-duration 600        # hard cap on total clip minutes
+        vvx gather "query" --pad 0                         # tight cuts, no handles
+        vvx gather "query" -o ~/Desktop/my-clips           # custom output directory
+        ```
+
+        ### Chapter-first gather (`--chapters-only`)
+
+        Search chapter titles instead of transcript text and extract each matching chapter
+        as a clip. `--snap chapter` is automatically implied — chapter boundaries are used
+        directly. `--context-seconds` is ignored. `--pad` applies normally.
+
+        ```
+        vvx gather "AGI" --chapters-only
+        vvx gather "AI safety" --chapters-only --limit 3
+        vvx gather "robotics" --chapters-only --uploader "Lex Fridman" --pad 0
+        vvx gather "energy" --chapters-only --after 2024-01-01 --limit 5
+        ```
+
+        Note: `--snap off` and `--snap block` cannot be combined with `--chapters-only`.
+        Using `--snap chapter` alongside `--chapters-only` is silently accepted.
+
+        Chapter data requires that yt-dlp reported chapters when the video was fetched.
+        If no results appear, run `vvx library <videoId>` to inspect `chapters` or re-sense.
+
+        ### Clip window flags
+        | Flag | Default | Description |
+        |------|---------|-------------|
+        | `--context-seconds N` | `1.0` | Seconds before/after each cue. Ignored with `--snap block/chapter` and `--chapters-only`. |
+        | `--snap off` | default | Cue + context. |
+        | `--snap block` | | Exact cue bounds; ignores `--context-seconds`. |
+        | `--snap chapter` | | Full chapter span; ignores `--context-seconds`. Falls back to block if no chapter data. |
+        | `--pad N` | `2.0` | Handle seconds added by FFmpegRunner after snap/context resolution. |
+
+        ### GatherClipSuccess NDJSON line
+        ```json
+        {
+          "success": true,
+          "outputPath": "/path/to/001_uploader_0:14:32_snippet.mp4",
+          "inputPath": "/path/to/source.mp4",
+          "videoId": "https://youtube.com/watch?v=...",
+          "title": "Video Title",
+          "uploader": "Channel Name",
+          "startTime": "00:14:32,000",
+          "endTime": "00:14:47,000",
+          "durationSeconds": 15.0,
+          "resolvedStartSeconds": 872.0,
+          "resolvedEndSeconds": 887.0,
+          "padSeconds": 2.0,
+          "paddedStartSeconds": 870.0,
+          "paddedEndSeconds": 889.0,
+          "plannedSrtPath": "/path/to/001_uploader_0:14:32_snippet.srt",
+          "matchedText": "...transcript snippet...",
+          "method": "frame_accurate",
+          "sizeBytes": 4194304,
+          "snapApplied": "off",
+          "thumbnailPath": null,
+          "embedSourceApplied": false,
+          "embedSourceNote": null,
+          "encodeMode": "default",
+          "chapterTitle": "The AGI Debate",
+          "chapterIndex": 3
+        }
+        ```
+        `chapterTitle` and `chapterIndex` are null when the hit has no chapter data.
+        `snapApplied` is `"chapter"` for `--chapters-only` and `--snap chapter` results.
+
+        ### Manifest files
+        Every gather run writes:
+        - `manifest.json` — machine-readable clip list with all timestamps and paths.
+        - `clips.md` — human-readable summary for sharing and review.
+
+        ### Agent rules for gather
+        - Gather requires Pro entitlement and ffmpeg (`vvx doctor` to verify).
+        - Use `--dry-run` before large runs to verify clip counts and duration.
+        - Use `--chapters-only` when the user wants full topic segments rather than transcript hits.
+        - Use `--snap chapter` when the hit is inside a chapter and the user wants the full segment.
+        - `--pad 0` for tight editorial cuts; default `--pad 2` for NLE cross-dissolve handles.
+        - `FFMPEG_NOT_FOUND`: run `vvx doctor --auto-fix` to install ffmpeg, then retry.
+        - `VIDEO_UNAVAILABLE`: source not on disk — run `vvx fetch "<videoId>" --archive` first.
         """
     }
 }
