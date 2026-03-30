@@ -1,78 +1,117 @@
 import Foundation
-import VideoVortexCore
 
 // MARK: - Manifest models
 
-struct GatherManifestEngagement: Encodable {
-    let viewCount: Int?
-    let likeCount: Int?
-    let commentCount: Int?
+public struct GatherManifestEngagement: Encodable, Sendable {
+    public let viewCount:    Int?
+    public let likeCount:    Int?
+    public let commentCount: Int?
+
+    public init(viewCount: Int?, likeCount: Int?, commentCount: Int?) {
+        self.viewCount    = viewCount
+        self.likeCount    = likeCount
+        self.commentCount = commentCount
+    }
 }
 
-struct GatherManifestChapter: Encodable {
-    let title: String
-    let index: Int
+public struct GatherManifestChapter: Encodable, Sendable {
+    public let title: String
+    public let index: Int
+
+    public init(title: String, index: Int) {
+        self.title = title
+        self.index = index
+    }
 }
 
-struct GatherManifestClip: Encodable {
-    let id: String
-    let videoId: String
-    let sourceUrl: String
-    let title: String
-    let uploader: String?
+public struct GatherManifestClip: Encodable, Sendable {
+    public let id:                   String
+    public let videoId:              String
+    public let sourceUrl:            String
+    public let title:                String
+    public let uploader:             String?
     /// Relative path to MP4 from the manifest's directory (e.g. `"./01_Lex_01-14-32.mp4"`).
-    let mp4Path: String
-    /// Relative path to SRT, or `null` when no transcript exists (whole file omitted — §C.4).
-    let srtPath: String?
+    public let mp4Path:              String
+    /// Relative path to SRT, or `null` when no transcript exists.
+    public let srtPath:              String?
     /// `"none"` when no transcript was available; `"local"` when blocks came from the archive.
-    let transcriptSource: String?
-    /// Logical clip start before pad is applied (L0 from Step 3 `GatherResolvedClip`).
-    let logicalStartSeconds: Double
+    public let transcriptSource:     String?
+    /// Logical clip start before pad is applied (L0).
+    public let logicalStartSeconds:  Double
     /// Logical clip end before pad is applied (L1).
-    let logicalEndSeconds: Double
-    let padSeconds: Double
+    public let logicalEndSeconds:    Double
+    public let padSeconds:           Double
     /// Actual start fed to ffmpeg: `max(0, L0 - pad)`.
-    let paddedStartSeconds: Double
+    public let paddedStartSeconds:   Double
     /// Actual end fed to ffmpeg: `L1 + pad` (clamped to duration when known).
-    let paddedEndSeconds: Double
-    let engagement: GatherManifestEngagement?
-    let chapter: GatherManifestChapter?
+    public let paddedEndSeconds:     Double
+    public let engagement:           GatherManifestEngagement?
+    public let chapter:              GatherManifestChapter?
     /// Literal shell command to reproduce this exact clip with the same pad (and Step 5 flags).
-    let reproduceCommand: String
+    public let reproduceCommand:     String
     /// `true` only if the whole-cue rule had to be overridden (currently always `false`).
-    let srtCuesTrimmed: Bool
+    public let srtCuesTrimmed:       Bool
     // MARK: Step 5 fields
     /// Relative path to the JPEG thumbnail extracted at logical start (L0), or `null`.
-    let thumbnailPath: String?
+    public let thumbnailPath:        String?
     /// `true` when `--embed-source` was on and the clip mux succeeded.
-    let embedSourceApplied: Bool
+    public let embedSourceApplied:   Bool
     /// Populated when embed was skipped or partially applied — otherwise `null`.
-    let embedSourceNote: String?
-    /// Encode mode used: `"copy"` (--fast), `"default"` (re-encode + VideoToolbox), or `"exact"` (--exact, libx264 CRF 18).
-    let encodeMode: String
+    public let embedSourceNote:      String?
+    /// Encode mode used: `"copy"` (--fast), `"default"`, or `"exact"` (--exact, libx264 CRF 18).
+    public let encodeMode:           String
+
+    public init(
+        id: String, videoId: String, sourceUrl: String, title: String,
+        uploader: String?, mp4Path: String, srtPath: String?,
+        transcriptSource: String?, logicalStartSeconds: Double,
+        logicalEndSeconds: Double, padSeconds: Double,
+        paddedStartSeconds: Double, paddedEndSeconds: Double,
+        engagement: GatherManifestEngagement?, chapter: GatherManifestChapter?,
+        reproduceCommand: String, srtCuesTrimmed: Bool, thumbnailPath: String?,
+        embedSourceApplied: Bool, embedSourceNote: String?, encodeMode: String
+    ) {
+        self.id                  = id
+        self.videoId             = videoId
+        self.sourceUrl           = sourceUrl
+        self.title               = title
+        self.uploader            = uploader
+        self.mp4Path             = mp4Path
+        self.srtPath             = srtPath
+        self.transcriptSource    = transcriptSource
+        self.logicalStartSeconds = logicalStartSeconds
+        self.logicalEndSeconds   = logicalEndSeconds
+        self.padSeconds          = padSeconds
+        self.paddedStartSeconds  = paddedStartSeconds
+        self.paddedEndSeconds    = paddedEndSeconds
+        self.engagement          = engagement
+        self.chapter             = chapter
+        self.reproduceCommand    = reproduceCommand
+        self.srtCuesTrimmed      = srtCuesTrimmed
+        self.thumbnailPath       = thumbnailPath
+        self.embedSourceApplied  = embedSourceApplied
+        self.embedSourceNote     = embedSourceNote
+        self.encodeMode          = encodeMode
+    }
 }
 
-struct GatherManifest: Encodable {
-    let schemaVersion: Int
-    let query: String
-    let padSeconds: Double
-    let generatedAt: String
+public struct GatherManifest: Encodable, Sendable {
+    public let schemaVersion:      Int
+    public let query:              String
+    public let padSeconds:         Double
+    public let generatedAt:        String
     /// `true` when the run used `--thumbnails`.
-    let thumbnailsEnabled: Bool
+    public let thumbnailsEnabled:  Bool
     /// `true` when the run used `--embed-source`.
-    let embedSourceEnabled: Bool
+    public let embedSourceEnabled: Bool
     /// Encode mode for this run: `"copy"` (--fast), `"default"`, or `"exact"` (--exact).
-    let encodeMode: String
-    let clips: [GatherManifestClip]
+    public let encodeMode:         String
+    public let clips:              [GatherManifestClip]
 
-    init(
-        query: String,
-        padSeconds: Double,
-        generatedAt: String,
-        thumbnailsEnabled: Bool,
-        embedSourceEnabled: Bool,
-        encodeMode: String,
-        clips: [GatherManifestClip]
+    public init(
+        query: String, padSeconds: Double, generatedAt: String,
+        thumbnailsEnabled: Bool, embedSourceEnabled: Bool,
+        encodeMode: String, clips: [GatherManifestClip]
     ) {
         self.schemaVersion      = 2
         self.query              = query
@@ -87,20 +126,20 @@ struct GatherManifest: Encodable {
 
 // MARK: - Writer
 
-enum GatherSidecarWriter {
+public enum GatherSidecarWriter {
 
     /// Write `manifest.json` and `clips.md` into `outputDir`.
     ///
     /// Both writes are non-atomic best-effort — failures are non-fatal for the
     /// gather run (caller should surface them as warnings, not hard errors).
-    static func write(
-        clips: [GatherManifestClip],
-        query: String,
-        padSeconds: Double,
-        outputDir: String,
-        thumbnailsEnabled: Bool,
+    public static func write(
+        clips:              [GatherManifestClip],
+        query:              String,
+        padSeconds:         Double,
+        outputDir:          String,
+        thumbnailsEnabled:  Bool,
         embedSourceEnabled: Bool,
-        encodeMode: String
+        encodeMode:         String
     ) throws {
         let iso = ISO8601DateFormatter()
         iso.formatOptions = [.withInternetDateTime]
@@ -126,8 +165,6 @@ enum GatherSidecarWriter {
     }
 
     // MARK: - clips.md template
-    // Note: No Step 5 fields (thumbnail paths / embed status) in clips.md — keep it
-    // text-only so imports into Obsidian, Notion, etc. do not gain broken local image links.
 
     private static func buildClipsMD(clips: [GatherManifestClip], query: String) -> String {
         let dateStr: String = {

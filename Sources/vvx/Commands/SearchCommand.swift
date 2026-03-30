@@ -275,291 +275,43 @@ struct SearchCommand: AsyncParsableCommand {
         try await runStandardFTS()
     }
 
-    // MARK: - Structural search
+    // MARK: - Structural search (thin delegate to SearchEngine)
 
     private mutating func runStructuralSearch() async throws {
-        let modeName = longestMonologue ? "longest_monologue" : "high_density"
-
-        // Open DB
-        let db: VortexDB
-        do {
-            db = try VortexDB.open()
-        } catch {
-            emitError(code: .indexCorrupt,
-                      message: "Could not open vortex.db: \(error.localizedDescription)")
-            throw ExitCode(VvxExitCode.forErrorCode(.indexCorrupt))
-        }
-
-        // Load lightweight video list
-        let summaries: [VideoSummary]
-        do {
-            summaries = try await db.videoSummaries(
-                platform:  platform,
-                uploader:  uploader,
-                afterDate: after
-            )
-        } catch {
-            emitError(code: .indexCorrupt,
-                      message: "Could not query videos: \(error.localizedDescription)")
-            throw ExitCode(VvxExitCode.forErrorCode(.indexCorrupt))
-        }
-
-        fputs("Scanning \(summaries.count) video(s) for structural analysis…\n", stderr)
-
-        // Fan-out: analyse each video's blocks
-        struct ScoredResult {
-            let summary:  VideoSummary
-            let monologue: MonologueSpan?
-            let density:   DensitySpan?
-            var score: Double {
-                monologue.map(\.durationSeconds) ?? density.map(\.wordsPerSecond) ?? 0
-            }
-        }
-
-        var results: [ScoredResult] = []
-
-        for summary in summaries {
-            let blocks: [StoredBlock]
-            do {
-                blocks = try await db.blocksForVideo(videoId: summary.id)
-            } catch {
-                continue
-            }
-            guard !blocks.isEmpty else { continue }
-
-            if longestMonologue {
-                if let span = StructuralAnalyzer.longestMonologue(
-                    blocks:        blocks,
-                    maxGapSeconds: monologueGap,
-                    chapters:      summary.chapters
-                ) {
-                    results.append(ScoredResult(summary: summary, monologue: span, density: nil))
-                }
-            } else {
-                if let span = StructuralAnalyzer.highDensityWindow(
-                    blocks:        blocks,
-                    windowSeconds: densityWindow,
-                    chapters:      summary.chapters
-                ) {
-                    results.append(ScoredResult(summary: summary, monologue: nil, density: span))
-                }
-            }
-        }
-
-        // Sort descending by score (duration or words-per-second)
-        results.sort { $0.score > $1.score }
-
-        // Apply limit
-        let topResults = Array(results.prefix(limit))
-
-        // Emit per-result NDJSON
-        for (i, r) in topResults.enumerated() {
-            let rank = i + 1
-            if let span = r.monologue {
-                let startS = span.startSeconds
-                let endS   = span.endSeconds
-                let repro  = reproduceCommand(videoPath: r.summary.videoPath,
-                                              start: startS, end: endS)
-                printNDJSON(MonologueResultLine(
-                    rank:              rank,
-                    videoTitle:        r.summary.title,
-                    uploader:          r.summary.uploader,
-                    platform:          r.summary.platform,
-                    uploadDate:        r.summary.uploadDate,
-                    videoPath:         r.summary.videoPath,
-                    startSeconds:      startS,
-                    endSeconds:        endS,
-                    durationSeconds:   span.durationSeconds,
-                    blockCount:        span.blockCount,
-                    structuralScore:   span.durationSeconds,
-                    transcriptExcerpt: span.transcriptExcerpt,
-                    chapterTitle:      span.chapterTitle,
-                    chapterIndex:      span.chapterIndex,
-                    isMultiChapter:    span.isMultiChapter,
-                    reproduceCommand:  repro
-                ))
-            } else if let span = r.density {
-                let startS = span.startSeconds
-                let endS   = span.endSeconds
-                let repro  = reproduceCommand(videoPath: r.summary.videoPath,
-                                              start: startS, end: endS)
-                printNDJSON(DensityResultLine(
-                    rank:              rank,
-                    videoTitle:        r.summary.title,
-                    uploader:          r.summary.uploader,
-                    platform:          r.summary.platform,
-                    uploadDate:        r.summary.uploadDate,
-                    videoPath:         r.summary.videoPath,
-                    startSeconds:      startS,
-                    endSeconds:        endS,
-                    windowSeconds:     densityWindow,
-                    wordCount:         span.wordCount,
-                    wordsPerSecond:    span.wordsPerSecond,
-                    structuralScore:   span.wordsPerSecond,
-                    transcriptExcerpt: span.transcriptExcerpt,
-                    chapterTitle:      span.chapterTitle,
-                    chapterIndex:      span.chapterIndex,
-                    isMultiChapter:    span.isMultiChapter,
-                    reproduceCommand:  repro
-                ))
-            }
-        }
-
-        // Emit summary NDJSON
-        printNDJSON(StructuralSummaryLine(
-            mode:          modeName,
-            scannedVideos: summaries.count,
-            resultCount:   topResults.count,
-            limit:         limit,
-            uploader:      uploader,
-            platform:      platform,
-            afterDate:     after
-        ))
-
-        fputs("Found \(topResults.count) result(s) from \(summaries.count) video(s).\n", stderr)
+        let config = SearchStructuralConfig(
+            longestMonologue: longestMonologue,
+            highDensity:      highDensity,
+            monologueGap:     monologueGap,
+            densityWindow:    densityWindow,
+            limit:            limit,
+            platform:         platform,
+            uploader:         uploader,
+            after:            after
+        )
+        print(await SearchEngine.runStructural(config: config, progress: { fputs($0 + "\n", stderr) }))
     }
 
-    // MARK: - Proximity search
+    // MARK: - Proximity search (thin delegate to SearchEngine)
 
     private mutating func runProximitySearch() async throws {
-        let withinSeconds = within!   // validated > 0 by guard block
-
-        // Parse AND-separated terms (case-insensitive split, trimmed).
         let rawTerms = (query ?? "")
             .components(separatedBy: " AND ")
             .map { $0.trimmingCharacters(in: .whitespacesAndNewlines) }
             .filter { !$0.isEmpty }
-
         guard rawTerms.count >= 2 else {
-            // Single term — no proximity possible; fall through to standard FTS.
-            fputs("Note: --within requires at least two terms joined by AND. Running standard search.\n", stderr)
+            fputs("Note: --within requires at least two AND terms. Running standard search.\n", stderr)
             try await runStandardFTS()
             return
         }
-
-        // Open DB.
-        let db: VortexDB
-        do {
-            db = try VortexDB.open()
-        } catch {
-            emitError(code: .indexCorrupt,
-                      message: "Could not open vortex.db: \(error.localizedDescription)")
-            throw ExitCode(VvxExitCode.forErrorCode(.indexCorrupt))
-        }
-
-        fputs("Running proximity search: \(rawTerms.joined(separator: " AND ")) within \(withinSeconds)s…\n", stderr)
-
-        // Per-term FTS5 sub-queries.
-        // Generous sub-query limit for proximity fan-out (scan all candidate hits per term).
-        let subLimit = max(1000, limit * 50)
-        var termHitsByVideo: [String: [String: [ProximityHit]]] = [:]
-        var videoMeta: [String: SearchHit] = [:]   // videoId → first hit (for metadata)
-
-        for term in rawTerms {
-            let hits: [SearchHit]
-            do {
-                hits = try await db.search(
-                    query:     term,
-                    platform:  platform,
-                    afterDate: after,
-                    uploader:  uploader,
-                    limit:     subLimit
-                )
-            } catch {
-                emitError(code: .indexEmpty,
-                          message: "Sub-query for term '\(term)' failed: \(error.localizedDescription)")
-                throw ExitCode(VvxExitCode.forErrorCode(.indexEmpty))
-            }
-            for hit in hits {
-                let pHit = ProximityHit(
-                    term:         term,
-                    startSeconds: hit.startSeconds,
-                    endSeconds:   hit.endSeconds,
-                    text:         hit.text
-                )
-                termHitsByVideo[hit.videoId, default: [:]][term, default: []].append(pHit)
-                if videoMeta[hit.videoId] == nil { videoMeta[hit.videoId] = hit }
-            }
-        }
-
-        // Keep only videos where ALL required terms have at least one hit.
-        let candidateVideos = termHitsByVideo.filter { $0.value.keys.count == rawTerms.count }
-
-        fputs("Found \(candidateVideos.count) video(s) with all terms present. Scanning for tightest windows…\n", stderr)
-
-        // Fan-out: find the tightest window per candidate video.
-        struct ProximityResult {
-            let videoId: String
-            let meta:    SearchHit
-            let window:  ProximityWindow
-        }
-
-        var results: [ProximityResult] = []
-
-        for (videoId, termHitsForVideo) in candidateVideos {
-            let blocks: [StoredBlock]
-            do {
-                blocks = try await db.blocksForVideo(videoId: videoId)
-            } catch {
-                continue
-            }
-            if let window = ProximityAnalyzer.minimumWindow(
-                termHits:      termHitsForVideo,
-                withinSeconds: withinSeconds,
-                blocks:        blocks
-            ), let meta = videoMeta[videoId] {
-                results.append(ProximityResult(videoId: videoId, meta: meta, window: window))
-            }
-        }
-
-        // Sort ascending by proximitySpanSeconds (tightest first), apply limit.
-        results.sort { $0.window.proximitySpanSeconds < $1.window.proximitySpanSeconds }
-        let topResults = Array(results.prefix(limit))
-
-        // Emit per-result NDJSON.
-        for (i, r) in topResults.enumerated() {
-            let rank  = i + 1
-            let win   = r.window
-            let repro = reproduceCommand(videoPath: r.meta.videoPath,
-                                         start: win.startSeconds, end: win.endSeconds)
-            printNDJSON(ProximityResultLine(
-                rank:                 rank,
-                videoTitle:           r.meta.title,
-                uploader:             r.meta.uploader,
-                platform:             r.meta.platform,
-                uploadDate:           r.meta.uploadDate,
-                videoPath:            r.meta.videoPath,
-                startSeconds:         win.startSeconds,
-                endSeconds:           win.endSeconds,
-                proximitySpanSeconds: win.proximitySpanSeconds,
-                withinSeconds:        withinSeconds,
-                terms:                rawTerms,
-                termHits:             win.termHits.map {
-                    ProximityTermHitLine(term: $0.term, startSeconds: $0.startSeconds, text: $0.text)
-                },
-                structuralScore:      win.proximitySpanSeconds,
-                transcriptExcerpt:    win.transcriptExcerpt,
-                reproduceCommand:     repro
-            ))
-        }
-
-        // Emit summary NDJSON.
-        let noWindowNote = topResults.isEmpty && !candidateVideos.isEmpty
-        if noWindowNote {
-            fputs("No videos had all terms within \(withinSeconds)s. Try a larger --within value.\n", stderr)
-        }
-        printNDJSON(ProximitySummaryLine(
-            terms:           rawTerms,
-            withinSeconds:   withinSeconds,
-            candidateVideos: candidateVideos.count,
-            resultCount:     topResults.count,
-            limit:           limit,
-            uploader:        uploader,
-            platform:        platform,
-            afterDate:       after
-        ))
-
-        fputs("Found \(topResults.count) proximity window(s) across \(candidateVideos.count) candidate video(s).\n", stderr)
+        let config = SearchProximityConfig(
+            query:         query!,
+            withinSeconds: within!,
+            limit:         limit,
+            platform:      platform,
+            uploader:      uploader,
+            after:         after
+        )
+        print(await SearchEngine.runProximity(config: config, progress: { fputs($0 + "\n", stderr) }))
     }
 
     // MARK: - Chapters-only search
@@ -1046,103 +798,6 @@ struct SearchCommand: AsyncParsableCommand {
                                                     agentAction: agentAction))
         print(env.jsonString())
     }
-}
-
-// MARK: - Structural search NDJSON models (CLI layer only)
-
-private struct MonologueResultLine: Encodable {
-    let success           = true
-    let mode              = "longest_monologue"
-    let rank:              Int
-    let videoTitle:        String
-    let uploader:          String?
-    let platform:          String?
-    let uploadDate:        String?
-    let videoPath:         String?
-    let startSeconds:      Double
-    let endSeconds:        Double
-    let durationSeconds:   Double
-    let blockCount:        Int
-    let structuralScore:   Double
-    let transcriptExcerpt: String
-    let chapterTitle:      String?
-    let chapterIndex:      Int?
-    let isMultiChapter:    Bool
-    let reproduceCommand:  String
-}
-
-private struct DensityResultLine: Encodable {
-    let success           = true
-    let mode              = "high_density"
-    let rank:              Int
-    let videoTitle:        String
-    let uploader:          String?
-    let platform:          String?
-    let uploadDate:        String?
-    let videoPath:         String?
-    let startSeconds:      Double
-    let endSeconds:        Double
-    let windowSeconds:     Double
-    let wordCount:         Int
-    let wordsPerSecond:    Double
-    let structuralScore:   Double
-    let transcriptExcerpt: String
-    let chapterTitle:      String?
-    let chapterIndex:      Int?
-    let isMultiChapter:    Bool
-    let reproduceCommand:  String
-}
-
-private struct StructuralSummaryLine: Encodable {
-    let success       = true
-    let mode:          String
-    let scannedVideos: Int
-    let resultCount:   Int
-    let limit:         Int
-    let uploader:      String?
-    let platform:      String?
-    let afterDate:     String?
-}
-
-// MARK: - Proximity search NDJSON models (CLI layer only)
-
-private struct ProximityTermHitLine: Encodable {
-    let term:         String
-    let startSeconds: Double
-    let text:         String
-}
-
-private struct ProximityResultLine: Encodable {
-    let success              = true
-    let mode                 = "proximity"
-    let rank:                 Int
-    let videoTitle:           String
-    let uploader:             String?
-    let platform:             String?
-    let uploadDate:           String?
-    let videoPath:            String?
-    let startSeconds:         Double
-    let endSeconds:           Double
-    let proximitySpanSeconds: Double
-    let withinSeconds:        Double
-    let terms:                [String]
-    let termHits:             [ProximityTermHitLine]
-    let structuralScore:      Double
-    let transcriptExcerpt:    String
-    let reproduceCommand:     String
-}
-
-private struct ProximitySummaryLine: Encodable {
-    let success         = true
-    let mode            = "proximity"
-    let terms:           [String]
-    let withinSeconds:   Double
-    let candidateVideos: Int
-    let resultCount:     Int
-    let limit:           Int
-    let uploader:        String?
-    let platform:        String?
-    let afterDate:       String?
 }
 
 // MARK: - Chapters-only search NDJSON models (CLI layer only)
