@@ -36,6 +36,7 @@ struct Vvx: AsyncParsableCommand {
             ClipCommand.self,
             LibraryCommand.self,
             ReindexCommand.self,
+            IngestCommand.self,
             SqlCommand.self,
             EngineCommand.self,
             DoctorCommand.self,

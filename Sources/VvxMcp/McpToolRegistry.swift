@@ -33,6 +33,8 @@ final class McpToolRegistry: Sendable {
             searchDefinition,
             syncDefinition,
             clipDefinition,
+            gatherDefinition,
+            ingestDefinition,
             libraryDefinition,
             sqlDefinition,
             reindexDefinition,
@@ -49,6 +51,8 @@ final class McpToolRegistry: Sendable {
         case "search":  return try await SearchTool.call(arguments: arguments)
         case "sync":    return try await SyncTool.call(arguments: arguments)
         case "clip":    return try await ClipTool.call(arguments: arguments)
+        case "gather":  return try await GatherTool.call(arguments: arguments)
+        case "ingest":  return try await IngestTool.call(arguments: arguments)
         case "library": return try await LibraryTool.call(arguments: arguments)
         case "sql":     return try await SqlTool.call(arguments: arguments)
         case "reindex": return try await ReindexTool.call(arguments: arguments)
@@ -165,28 +169,32 @@ final class McpToolRegistry: Sendable {
     private var searchDefinition: [String: Any] {[
         "name": "search",
         "description": """
-        Full-text search across all indexed transcripts in vortex.db. \
-        Supports FTS5 syntax: boolean operators (AI AND danger), phrase search ("exact phrase"), \
-        Porter stemming (run matches running), and prefix wildcard (intell*). \
-        \n\
-        outputFormat is REQUIRED — choose deliberately: \
-        • "rag" — Markdown context document with per-hit attribution, timestamps, and ready-to-run \
-          vvx clip commands. Use when answering a user's question or injecting context into your window. \
-        • "json" — Structured SearchOutput JSON. Use when chaining results into the clip tool or a script. \
-        \n\
-        Use maxTokens with outputFormat="rag" to prevent context blowout on large result sets.
+        Full-text search, structural analysis, and proximity search across all indexed transcripts.
+
+        MODES:
+        • Standard FTS (default): Provide query + outputFormat.
+          outputFormat: "rag" = Markdown context for answering questions; "json" = structured SearchOutput for pipelines.
+        • Structural (no query needed): Set longestMonologue OR highDensity.
+          Returns top N spans sorted by duration (monologue) or words-per-second (density). Always JSON.
+        • Proximity: Provide query with explicit AND + set within (seconds).
+          Returns the tightest window where all terms co-occur, sorted ascending by proximitySpanSeconds.
+          Always JSON. structuralScore = proximitySpanSeconds — LOWER is better.
+
+        All structural/proximity result lines include videoId, transcriptExcerpt (≤ 1,000 chars), and
+        reproduceCommand. Pass transcriptExcerpt to an LLM to evaluate fit before calling gather.
+        Results are pre-sorted; agents should consume them in order without re-sorting.
         """,
         "inputSchema": [
             "type": "object",
             "properties": [
                 "query": [
                     "type": "string",
-                    "description": "FTS5 query. Supports AND, OR, NOT, phrase search (quoted), and prefix wildcard (word*)."
+                    "description": "FTS5 query. Supports AND, OR, NOT, phrase search (quoted), and prefix wildcard (word*). Optional when longestMonologue or highDensity is set."
                 ],
                 "outputFormat": [
                     "type": "string",
                     "enum": ["json", "rag"],
-                    "description": "REQUIRED. 'rag' for human-readable Markdown with clip commands; 'json' for structured data."
+                    "description": "Required for standard FTS. Ignored for structural/proximity (always returns JSON). 'rag' for human-readable Markdown with clip commands; 'json' for structured data."
                 ],
                 "limit": [
                     "type": "integer",
@@ -208,9 +216,33 @@ final class McpToolRegistry: Sendable {
                 "maxTokens": [
                     "type": "integer",
                     "description": "Maximum estimated tokens for rag output. Truncates hits before exceeding budget. Requires outputFormat='rag'."
+                ],
+                "longestMonologue": [
+                    "type": "boolean",
+                    "default": false,
+                    "description": "Find the longest continuous speech spans across all indexed videos. No query needed. Returns MonologueResultLine NDJSON sorted by duration descending."
+                ],
+                "highDensity": [
+                    "type": "boolean",
+                    "default": false,
+                    "description": "Find the highest words-per-second windows across all indexed videos. No query needed. Returns DensityResultLine NDJSON sorted by wordsPerSecond descending."
+                ],
+                "monologueGap": [
+                    "type": "number",
+                    "default": 1.5,
+                    "description": "Maximum silence gap (seconds) allowed between transcript blocks within the same monologue span. Used with longestMonologue."
+                ],
+                "densityWindow": [
+                    "type": "number",
+                    "default": 60.0,
+                    "description": "Sliding window width in seconds for high-density analysis. Used with highDensity."
+                ],
+                "within": [
+                    "type": "number",
+                    "description": "Proximity window in seconds. Requires query with at least two explicit AND terms. Returns the tightest co-occurrence window; must be > 0."
                 ]
             ],
-            "required": ["query", "outputFormat"]
+            "required": []
         ]
     ]}
 
@@ -319,6 +351,162 @@ final class McpToolRegistry: Sendable {
                 ]
             ],
             "required": ["inputPath", "start", "end"]
+        ]
+    ]}
+
+    private var gatherDefinition: [String: Any] {[
+        "name": "gather",
+        "description": """
+        Batch-extract clips from your local vortex.db archive as frame-accurate MP4 files. \
+        Searches indexed transcripts or chapter titles, resolves clip windows, and runs up to \
+        4 concurrent ffmpeg extractions. Writes per-clip re-timed SRT subtitles, manifest.json, \
+        and clips.md to an auto-named output folder on ~/Desktop.
+
+        TIMEOUT WARNING: Each clip takes 5–60 seconds depending on length and encode mode. \
+        For batches > 5 clips, use dryRun=true first to preview planned clips, then re-call \
+        without dryRun. For very large batches (>20 clips), have the user run 'vvx gather …' \
+        in Terminal — no timeout on the CLI.
+
+        PRO FEATURE: gather is a Pro feature. During Public Beta (Step 11 not yet shipped), \
+        all users may use gather freely.
+
+        The last NDJSON line is always a summary with outputDir and manifestPath. \
+        manifestPath is null for dry-runs or zero-success runs. \
+        Partial failures appear as success:false lines — the run does not abort on one failure. \
+        Agents should present manifestPath to the user as the handoff artifact for NLE editors.
+        """,
+        "inputSchema": [
+            "type": "object",
+            "properties": [
+                "query": [
+                    "type": "string",
+                    "description": "FTS5 query. Required. Supports AND, OR, NOT, phrase (quoted), prefix*."
+                ],
+                "limit": [
+                    "type": "integer",
+                    "description": "REQUIRED. Max clips to extract. Keep ≤ 5 for live extraction to avoid MCP timeouts."
+                ],
+                "dryRun": [
+                    "type": "boolean",
+                    "default": false,
+                    "description": "Plan-only: skip ffmpeg, return planned paths and timing."
+                ],
+                "platform": [
+                    "type": "string",
+                    "description": "Filter by platform (e.g. YouTube, TikTok)."
+                ],
+                "after": [
+                    "type": "string",
+                    "description": "Only include videos uploaded on or after YYYY-MM-DD."
+                ],
+                "uploader": [
+                    "type": "string",
+                    "description": "Filter by uploader or channel name (exact match)."
+                ],
+                "minViews": [
+                    "type": "integer",
+                    "description": "Only gather clips from videos with at least this many views."
+                ],
+                "minLikes": [
+                    "type": "integer",
+                    "description": "Only gather clips from videos with at least this many likes."
+                ],
+                "minComments": [
+                    "type": "integer",
+                    "description": "Only gather clips from videos with at least this many comments."
+                ],
+                "contextSeconds": [
+                    "type": "number",
+                    "default": 1.0,
+                    "description": "Seconds before/after matched cue. Ignored with snap block/chapter."
+                ],
+                "snap": [
+                    "type": "string",
+                    "enum": ["off", "block", "chapter"],
+                    "default": "off",
+                    "description": "off=cue+context; block=exact cue bounds; chapter=full chapter span."
+                ],
+                "maxTotalDuration": [
+                    "type": "number",
+                    "description": "Hard cap on total clip seconds. Lower-relevance clips dropped first."
+                ],
+                "pad": [
+                    "type": "number",
+                    "default": 2.0,
+                    "description": "NLE handle seconds before/after logical in/out. Clamped at 0."
+                ],
+                "fast": [
+                    "type": "boolean",
+                    "default": false,
+                    "description": "Keyframe seek + stream copy. Instant but ±2–5 s drift."
+                ],
+                "exact": [
+                    "type": "boolean",
+                    "default": false,
+                    "description": "libx264 CRF 18 re-encode — frame-accurate, slow. Mutually exclusive with fast."
+                ],
+                "thumbnails": [
+                    "type": "boolean",
+                    "default": false,
+                    "description": "Extract one JPEG still per clip at logical clip start."
+                ],
+                "embedSource": [
+                    "type": "boolean",
+                    "default": false,
+                    "description": "Embed source URL, title, and uploader into MP4 metadata atoms."
+                ],
+                "chaptersOnly": [
+                    "type": "boolean",
+                    "default": false,
+                    "description": "Search chapter titles; extract full chapter spans. Implies snap=chapter."
+                ]
+            ],
+            "required": ["query", "limit"]
+        ]
+    ]}
+
+    private var ingestDefinition: [String: Any] {[
+        "name": "ingest",
+        "description": """
+        Index local video files into vortex.db without moving or copying them. \
+        Recursively scans a folder for video files (.mp4 by default), matches sibling \
+        sidecars in the same directory (.srt for transcript, .info.json for yt-dlp-style \
+        metadata), and indexes each file using its absolute path. \
+        \n\
+        Sidecars must share the video's filename stem and directory. \
+        .en.srt (or .srt) → transcript_source "local". .info.json → title, uploader, etc. \
+        \n\
+        Returns NDJSON: one result line per video (indexed or skipped), ending with a \
+        type: "summary" line containing: indexed, skipped, skipped_reasons \
+        (keys non_video / invalid_sidecar / corrupt_media / already_indexed — all always \
+        present as integers ≥ 0), and malformed_info_json_count (always present). \
+        \n\
+        Agents should prefer dryRun=true on unfamiliar folder trees first to preview \
+        without writing to vortex.db or running any probes. \
+        With dryRun=true the summary line will include "dry_run":true. \
+        Partial failures (per-file) appear as success:false lines — the run never aborts \
+        on a single bad file. Fatal errors (path not found, not a directory) return a \
+        VvxErrorEnvelope.
+        """,
+        "inputSchema": [
+            "type": "object",
+            "properties": [
+                "path": [
+                    "type": "string",
+                    "description": "Absolute or relative path to the root folder to scan. Resolved to absolute before any DB write."
+                ],
+                "dryRun": [
+                    "type": "boolean",
+                    "default": false,
+                    "description": "Walk the folder and match sidecars without writing to vortex.db or running ffprobe. Recommended for previewing large or unfamiliar trees."
+                ],
+                "forceReindex": [
+                    "type": "boolean",
+                    "default": false,
+                    "description": "Bypass dedup check and re-upsert metadata for files already indexed in vortex.db."
+                ]
+            ],
+            "required": ["path"]
         ]
     ]}
 
