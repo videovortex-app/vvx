@@ -32,7 +32,7 @@ struct DocsCommand: AsyncParsableCommand {
 
     // MARK: - Arguments & flags
 
-    @Argument(help: "Show docs for a specific command: sense, fetch, search, sync, clip, library, sql, reindex, doctor, engine")
+    @Argument(help: "Show docs for a specific command: sense, fetch, search, gather, sync, clip, library, sql, reindex, doctor, engine")
     var topic: String?
 
     @Flag(name: .long, help: "Print error codes and agentAction recovery table only.")
@@ -64,6 +64,7 @@ struct DocsCommand: AsyncParsableCommand {
             case "sense":                    print(senseSection)
             case "fetch":                    print(fetchSection)
             case "search":                   print(searchSection)
+            case "gather":                   print(gatherSection)
             case "sync":                     print(syncSection)
             case "clip":                     print(clipSection)
             case "library", "lib":           print(librarySection)
@@ -74,7 +75,7 @@ struct DocsCommand: AsyncParsableCommand {
             case "errors", "error":          print(errorsSection)
             case "examples", "ex":           print(examplesSection)
             default:
-                fputs("Unknown topic '\(t)'. Valid topics: sense, fetch, search, sync, clip, library, sql, reindex, doctor, engine, errors, examples\n", stderr)
+                fputs("Unknown topic '\(t)'. Valid topics: sense, fetch, search, gather, sync, clip, library, sql, reindex, doctor, engine, errors, examples\n", stderr)
                 throw ExitCode.failure
             }
             return
@@ -100,6 +101,8 @@ private extension DocsCommand {
         \(fetchSection)
 
         \(searchSection)
+
+        \(gatherSection)
 
         \(syncSection)
 
@@ -443,10 +446,16 @@ private extension DocsCommand {
         }
         ```
 
+        Both structural modes now include chapter context on every result (when chapter data
+        is present on the video):
+        - `chapterTitle`: title of the chapter the span/window begins in (null if no chapters).
+        - `chapterIndex`: zero-based index into the video's chapters array.
+        - `isMultiChapter`: true when the span crosses a chapter boundary.
+
         #### Structural search mutual-exclusion rules
         - `--longest-monologue` and `--high-density` cannot be combined.
         - Neither flag can be combined with a query string.
-        - Neither flag can be combined with `--export-nle` or `--within`.
+        - Neither flag can be combined with `--export-nle`, `--within`, or `--chapters-only`.
         - `--rag` cannot be used with structural flags.
         - `--uploader`, `--platform`, `--after`, and `--limit` are compatible with both flags.
 
@@ -456,6 +465,52 @@ private extension DocsCommand {
         - `high_density`: words per second (higher = denser).
         - `proximity`: `proximitySpanSeconds` — **lower is better** (tighter collision).
           Results are pre-sorted correctly; agents do not need to re-sort.
+
+        ### Chapter search (`--chapters-only`)
+
+        Search chapter titles instead of transcript text. Returns one result per chapter whose
+        title matches all query terms (case-insensitive AND semantics — all terms must match).
+
+        ```
+        vvx search "AGI safety" --chapters-only
+        vvx search "nuclear energy" --chapters-only --uploader "Lex Fridman"
+        vvx search "mars" --chapters-only --platform YouTube --limit 10
+        vvx search "robotics" --chapters-only --after 2024-01-01
+        ```
+
+        NDJSON output per result (one line per matching chapter):
+        ```json
+        {
+          "success": true,
+          "mode": "chapters_only",
+          "rank": 1,
+          "videoId": "https://www.youtube.com/watch?v=xyz",
+          "videoTitle": "Lex Fridman — Episode 400",
+          "uploader": "Lex Fridman",
+          "platform": "YouTube",
+          "uploadDate": "2024-11-15",
+          "videoPath": "/abs/path/to/video.mp4",
+          "chapterTitle": "The AGI Debate",
+          "chapterIndex": 3,
+          "startSeconds": 4800.0,
+          "endSeconds": 5760.0,
+          "durationSeconds": 960.0,
+          "transcriptExcerpt": "...first ~1000 chars of chapter transcript...",
+          "reproduceCommand": "vvx clip \\"/abs/path/video.mp4\\" --start 4800.0 --end 5760.0"
+        }
+        ```
+        Final summary line:
+        ```json
+        {"success":true,"mode":"chapters_only","query":"AGI safety","terms":["AGI","safety"],"scannedVideos":47,"matchedChapters":8,"resultCount":5,"limit":5,"uploader":null,"platform":null,"afterDate":null}
+        ```
+
+        #### `--chapters-only` mutual-exclusion rules
+        - Requires a query string.
+        - Cannot be combined with `--longest-monologue`, `--high-density`, `--rag`, `--export-nle`.
+        - `--uploader`, `--platform`, `--after`, and `--limit` are compatible.
+
+        Note: Chapter data requires that yt-dlp reported chapters when the video was fetched.
+        If no results appear, run `vvx library <videoId>` to inspect `chapters` or re-sense.
 
         ### Proximity search (explicit AND required)
 
@@ -528,12 +583,119 @@ private extension DocsCommand {
         - Use `--high-density` to find the moment a speaker hammers a topic hardest.
         - Use `--within` to find where two or more concepts collide in time — this is the
           goldilocks zone between phrase matching (too brittle) and boolean (too noisy).
+        - Use `--chapters-only` when the user asks about topics by chapter/section name —
+          e.g. "find episodes with a chapter about AGI safety." Chapter search is faster
+          than transcript FTS because it skips block loading entirely.
         - For structural and proximity results, use `reproduceCommand` to cut the clip directly.
         - `structuralScore` polarity differs by mode: higher is better for monologue/density,
           **lower is better for proximity** (tightest collision = smallest span).
         - `INDEX_EMPTY` error means no videos are indexed yet: run `vvx sync <url> --limit 10`.
         - For NLE export, source files must be on disk. Use `--dry-run` to check clip availability
           before writing the file.
+        """
+    }
+}
+
+// MARK: - Section: gather
+
+private extension DocsCommand {
+    var gatherSection: String {
+        """
+        ## gather — Batch extract clips matching a search query (Pro)
+
+        Searches vortex.db for the query and extracts every matching transcript segment
+        as a frame-accurate MP4 clip into an organized output folder. Each clip comes with
+        re-timed SRT subtitles, a manifest.json, and a clips.md summary.
+
+        ### Usage — standard gather
+        ```
+        vvx gather "query" --limit 20
+        vvx gather "query" --uploader "Channel Name" --limit 10
+        vvx gather "query" --platform YouTube --after 2024-01-01
+        vvx gather "query" --snap chapter --limit 5        # clip full chapter spans
+        vvx gather "query" --min-views 1000000             # engagement filter
+        vvx gather "query" --dry-run                       # plan without extracting
+        vvx gather "query" --fast                          # keyframe seek (instant, ±5s)
+        vvx gather "query" --exact                         # re-encode for precision
+        vvx gather "query" --max-total-duration 600        # hard cap on total clip minutes
+        vvx gather "query" --pad 0                         # tight cuts, no handles
+        vvx gather "query" -o ~/Desktop/my-clips           # custom output directory
+        ```
+
+        ### Chapter-first gather (`--chapters-only`)
+
+        Search chapter titles instead of transcript text and extract each matching chapter
+        as a clip. `--snap chapter` is automatically implied — chapter boundaries are used
+        directly. `--context-seconds` is ignored. `--pad` applies normally.
+
+        ```
+        vvx gather "AGI" --chapters-only
+        vvx gather "AI safety" --chapters-only --limit 3
+        vvx gather "robotics" --chapters-only --uploader "Lex Fridman" --pad 0
+        vvx gather "energy" --chapters-only --after 2024-01-01 --limit 5
+        ```
+
+        Note: `--snap off` and `--snap block` cannot be combined with `--chapters-only`.
+        Using `--snap chapter` alongside `--chapters-only` is silently accepted.
+
+        Chapter data requires that yt-dlp reported chapters when the video was fetched.
+        If no results appear, run `vvx library <videoId>` to inspect `chapters` or re-sense.
+
+        ### Clip window flags
+        | Flag | Default | Description |
+        |------|---------|-------------|
+        | `--context-seconds N` | `1.0` | Seconds before/after each cue. Ignored with `--snap block/chapter` and `--chapters-only`. |
+        | `--snap off` | default | Cue + context. |
+        | `--snap block` | | Exact cue bounds; ignores `--context-seconds`. |
+        | `--snap chapter` | | Full chapter span; ignores `--context-seconds`. Falls back to block if no chapter data. |
+        | `--pad N` | `2.0` | Handle seconds added by FFmpegRunner after snap/context resolution. |
+
+        ### GatherClipSuccess NDJSON line
+        ```json
+        {
+          "success": true,
+          "outputPath": "/path/to/001_uploader_0:14:32_snippet.mp4",
+          "inputPath": "/path/to/source.mp4",
+          "videoId": "https://youtube.com/watch?v=...",
+          "title": "Video Title",
+          "uploader": "Channel Name",
+          "startTime": "00:14:32,000",
+          "endTime": "00:14:47,000",
+          "durationSeconds": 15.0,
+          "resolvedStartSeconds": 872.0,
+          "resolvedEndSeconds": 887.0,
+          "padSeconds": 2.0,
+          "paddedStartSeconds": 870.0,
+          "paddedEndSeconds": 889.0,
+          "plannedSrtPath": "/path/to/001_uploader_0:14:32_snippet.srt",
+          "matchedText": "...transcript snippet...",
+          "method": "frame_accurate",
+          "sizeBytes": 4194304,
+          "snapApplied": "off",
+          "thumbnailPath": null,
+          "embedSourceApplied": false,
+          "embedSourceNote": null,
+          "encodeMode": "default",
+          "chapterTitle": "The AGI Debate",
+          "chapterIndex": 3
+        }
+        ```
+        `chapterTitle` and `chapterIndex` are null when the hit has no chapter data.
+        `snapApplied` is `"chapter"` for `--chapters-only` and `--snap chapter` results.
+
+        ### Manifest files
+        Every gather run writes:
+        - `manifest.json` — machine-readable clip list with all timestamps and paths.
+        - `clips.md` — human-readable summary for sharing and review.
+
+        ### Agent rules for gather
+        - Gather requires Pro entitlement and ffmpeg (`vvx doctor` to verify).
+        - Use `--dry-run` before large runs to verify clip counts and duration.
+        - Use `--chapters-only` when the user wants full topic segments rather than transcript hits.
+        - Use `--snap chapter` when the hit is inside a chapter and the user wants the full segment.
+        - `--pad 0` for tight editorial cuts; default `--pad 2` for NLE cross-dissolve handles.
+        - `FFMPEG_NOT_FOUND`: run `vvx doctor --auto-fix` to install ffmpeg, then retry.
+        - `VIDEO_UNAVAILABLE`: source not on disk — run `vvx fetch "<videoId>" --archive` first.
         """
     }
 }

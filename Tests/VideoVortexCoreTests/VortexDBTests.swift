@@ -669,4 +669,123 @@ struct VortexDBTests {
         #expect(hits.count == 1)
         #expect(hits[0].videoId == vidGood)
     }
+
+    // MARK: - Phase 3: blocksForVideo chapterIndex
+
+    @Test("blocksForVideo returns chapterIndex when present and nil when absent")
+    func testBlocksForVideoChapterIndex() async throws {
+        let (db, url) = try await makeDB()
+        defer { cleanup(url) }
+
+        let videoId = "https://youtube.com/watch?v=chapterblocks"
+        try await db.upsertVideo(VideoRecord(
+            id: videoId, title: "Chapter Blocks",
+            sensedAt: "2026-01-01T00:00:00Z"
+        ))
+        let blocks = [
+            SRTBlock(index: 1, startTime: "00:00:01,000", endTime: "00:00:04,000",
+                     startSeconds: 1.0, endSeconds: 4.0, text: "block one"),
+            SRTBlock(index: 2, startTime: "00:00:05,000", endTime: "00:00:08,000",
+                     startSeconds: 5.0, endSeconds: 8.0, text: "block two")
+        ]
+        try await db.upsertBlocks(blocks, videoId: videoId, title: "Chapter Blocks",
+                                  platform: nil, uploader: nil)
+
+        // Without chapter backfill, chapter_index should be nil.
+        let storedBlocks = try await db.blocksForVideo(videoId: videoId)
+        #expect(storedBlocks.count == 2)
+        #expect(storedBlocks[0].chapterIndex == nil)
+        #expect(storedBlocks[1].chapterIndex == nil)
+    }
+
+    @Test("blocksForVideo returns empty array for unknown videoId")
+    func testBlocksForVideoEmpty() async throws {
+        let (db, url) = try await makeDB()
+        defer { cleanup(url) }
+
+        let result = try await db.blocksForVideo(videoId: "https://unknown.url/nonexistent")
+        #expect(result.isEmpty)
+    }
+
+    // MARK: - Phase 3: videoSummaries chapters + engagement
+
+    @Test("videoSummaries returns chapters decoded from JSON blob")
+    func testVideoSummariesChapters() async throws {
+        let (db, url) = try await makeDB()
+        defer { cleanup(url) }
+
+        let chapters = [
+            VideoChapter(title: "Introduction", startTime: 0),
+            VideoChapter(title: "The AGI Debate", startTime: 120),
+            VideoChapter(title: "Conclusion", startTime: 3600)
+        ]
+        let videoId = "https://youtube.com/watch?v=withchapters"
+        try await db.upsertVideo(VideoRecord(
+            id: videoId, title: "Episode With Chapters",
+            sensedAt: "2026-01-01T00:00:00Z",
+            chapters: chapters
+        ))
+
+        let summaries = try await db.videoSummaries()
+        #expect(summaries.count == 1)
+        #expect(summaries[0].chapters.count == 3)
+        #expect(summaries[0].chapters[0].title == "Introduction")
+        #expect(summaries[0].chapters[1].title == "The AGI Debate")
+        #expect(summaries[0].chapters[2].title == "Conclusion")
+    }
+
+    @Test("videoSummaries returns empty chapters for video with no chapter data")
+    func testVideoSummariesNoChapters() async throws {
+        let (db, url) = try await makeDB()
+        defer { cleanup(url) }
+
+        try await db.upsertVideo(VideoRecord(
+            id: "https://youtube.com/watch?v=nochapters",
+            title: "No Chapters",
+            sensedAt: "2026-01-01T00:00:00Z"
+        ))
+
+        let summaries = try await db.videoSummaries()
+        #expect(summaries.count == 1)
+        #expect(summaries[0].chapters.isEmpty)
+    }
+
+    @Test("videoSummaries returns engagement counts")
+    func testVideoSummariesEngagementCounts() async throws {
+        let (db, url) = try await makeDB()
+        defer { cleanup(url) }
+
+        try await db.upsertVideo(VideoRecord(
+            id: "https://youtube.com/watch?v=engagementvideo",
+            title: "Engagement Video",
+            sensedAt: "2026-01-01T00:00:00Z",
+            viewCount: 1_500_000,
+            likeCount: 45_000,
+            commentCount: 3_200
+        ))
+
+        let summaries = try await db.videoSummaries()
+        #expect(summaries.count == 1)
+        #expect(summaries[0].viewCount == 1_500_000)
+        #expect(summaries[0].likeCount == 45_000)
+        #expect(summaries[0].commentCount == 3_200)
+    }
+
+    @Test("videoSummaries returns nil engagement for video without counts")
+    func testVideoSummariesNilEngagement() async throws {
+        let (db, url) = try await makeDB()
+        defer { cleanup(url) }
+
+        try await db.upsertVideo(VideoRecord(
+            id: "https://youtube.com/watch?v=noengagement",
+            title: "No Engagement",
+            sensedAt: "2026-01-01T00:00:00Z"
+        ))
+
+        let summaries = try await db.videoSummaries()
+        #expect(summaries.count == 1)
+        #expect(summaries[0].viewCount == nil)
+        #expect(summaries[0].likeCount == nil)
+        #expect(summaries[0].commentCount == nil)
+    }
 }

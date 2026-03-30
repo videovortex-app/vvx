@@ -130,15 +130,142 @@ final class StructuralAnalyzerTests: XCTestCase {
         XCTAssertEqual(span?.wordsPerSecond ?? 0, 6.0 / 30.0, accuracy: 0.001)
     }
 
+    // MARK: - Chapter context — longestMonologue
+
+    func testLongestMonologue_chapterAssigned() {
+        let chapters = [
+            VideoChapter(title: "Introduction", startTime: 0),
+            VideoChapter(title: "The AGI Debate", startTime: 10),
+            VideoChapter(title: "Safety", startTime: 50)
+        ]
+        let blocks = [
+            block(start: 10, end: 20, text: "AGI is coming", chapterIndex: 1),
+            block(start: 21, end: 30, text: "faster than expected", chapterIndex: 1)
+        ]
+        let span = StructuralAnalyzer.longestMonologue(blocks: blocks, maxGapSeconds: 5.0, chapters: chapters)
+        XCTAssertEqual(span?.chapterTitle, "The AGI Debate")
+        XCTAssertEqual(span?.chapterIndex, 1)
+        XCTAssertEqual(span?.isMultiChapter, false)
+    }
+
+    func testLongestMonologue_nilChapterOnFirstBlock() {
+        let chapters = [
+            VideoChapter(title: "Introduction", startTime: 0)
+        ]
+        let blocks = [
+            block(start: 0, end: 5, text: "Hello", chapterIndex: nil),
+            block(start: 5.5, end: 10, text: "World", chapterIndex: 0)
+        ]
+        let span = StructuralAnalyzer.longestMonologue(blocks: blocks, maxGapSeconds: 2.0, chapters: chapters)
+        XCTAssertNil(span?.chapterTitle)
+        XCTAssertNil(span?.chapterIndex)
+        XCTAssertEqual(span?.isMultiChapter, false)
+    }
+
+    func testLongestMonologue_isMultiChapter() {
+        let chapters = [
+            VideoChapter(title: "Chapter One", startTime: 0),
+            VideoChapter(title: "Chapter Two", startTime: 10)
+        ]
+        let blocks = [
+            block(start: 0, end: 5, text: "Intro text", chapterIndex: 0),
+            block(start: 5.5, end: 10, text: "More intro", chapterIndex: 0),
+            block(start: 10.5, end: 15, text: "Chapter two text", chapterIndex: 1)
+        ]
+        let span = StructuralAnalyzer.longestMonologue(blocks: blocks, maxGapSeconds: 2.0, chapters: chapters)
+        XCTAssertEqual(span?.chapterTitle, "Chapter One")
+        XCTAssertEqual(span?.chapterIndex, 0)
+        XCTAssertEqual(span?.isMultiChapter, true)
+    }
+
+    func testLongestMonologue_emptyChapters() {
+        let blocks = [
+            block(start: 0, end: 5, text: "Hello", chapterIndex: 2)
+        ]
+        let span = StructuralAnalyzer.longestMonologue(blocks: blocks, chapters: [])
+        XCTAssertNil(span?.chapterTitle)
+        XCTAssertNil(span?.chapterIndex)
+        XCTAssertEqual(span?.isMultiChapter, false)
+    }
+
+    func testLongestMonologue_backwardCompatNilChapters() {
+        // Calling without chapters parameter should compile and return nil chapter fields.
+        let blocks = [block(start: 0, end: 5, text: "Hello")]
+        let span = StructuralAnalyzer.longestMonologue(blocks: blocks)
+        XCTAssertNil(span?.chapterTitle)
+        XCTAssertNil(span?.chapterIndex)
+        XCTAssertEqual(span?.isMultiChapter, false)
+    }
+
+    // MARK: - Chapter context — highDensityWindow
+
+    func testHighDensityWindow_chapterAssigned() {
+        let chapters = [
+            VideoChapter(title: "Existential Risks", startTime: 0)
+        ]
+        let blocks = [
+            block(start: 0, end: 5, text: Array(repeating: "word", count: 20).joined(separator: " "), chapterIndex: 0)
+        ]
+        let span = StructuralAnalyzer.highDensityWindow(blocks: blocks, windowSeconds: 60.0, chapters: chapters)
+        XCTAssertEqual(span?.chapterTitle, "Existential Risks")
+        XCTAssertEqual(span?.chapterIndex, 0)
+        XCTAssertEqual(span?.isMultiChapter, false)
+    }
+
+    func testHighDensityWindow_crossChapterWindow() {
+        let chapters = [
+            VideoChapter(title: "Chapter A", startTime: 0),
+            VideoChapter(title: "Chapter B", startTime: 10)
+        ]
+        let blocks = [
+            block(start: 0, end: 5, text: Array(repeating: "w", count: 50).joined(separator: " "), chapterIndex: 0),
+            block(start: 5.5, end: 10, text: Array(repeating: "w", count: 50).joined(separator: " "), chapterIndex: 0),
+            block(start: 10.5, end: 15, text: Array(repeating: "w", count: 50).joined(separator: " "), chapterIndex: 1)
+        ]
+        let span = StructuralAnalyzer.highDensityWindow(blocks: blocks, windowSeconds: 30.0, chapters: chapters)
+        // Left boundary is block 0 (chapter 0); window includes chapter 1 → isMultiChapter.
+        XCTAssertEqual(span?.chapterTitle, "Chapter A")
+        XCTAssertEqual(span?.isMultiChapter, true)
+    }
+
+    func testHighDensityWindow_nilAnchorChapter() {
+        let chapters = [
+            VideoChapter(title: "Intro", startTime: 0)
+        ]
+        let blocks = [
+            block(start: 0, end: 5, text: "hello world", chapterIndex: nil)
+        ]
+        let span = StructuralAnalyzer.highDensityWindow(blocks: blocks, windowSeconds: 60.0, chapters: chapters)
+        XCTAssertNil(span?.chapterTitle)
+        XCTAssertEqual(span?.isMultiChapter, false)
+    }
+
+    func testHighDensityWindow_emptyChapters() {
+        let blocks = [block(start: 0, end: 5, text: "hello world", chapterIndex: 0)]
+        let span = StructuralAnalyzer.highDensityWindow(blocks: blocks, chapters: [])
+        XCTAssertNil(span?.chapterTitle)
+        XCTAssertNil(span?.chapterIndex)
+        XCTAssertEqual(span?.isMultiChapter, false)
+    }
+
+    func testHighDensityWindow_backwardCompatNilChapters() {
+        let blocks = [block(start: 0, end: 5, text: "hello world")]
+        let span = StructuralAnalyzer.highDensityWindow(blocks: blocks)
+        XCTAssertNil(span?.chapterTitle)
+        XCTAssertNil(span?.chapterIndex)
+        XCTAssertEqual(span?.isMultiChapter, false)
+    }
+
     // MARK: - Helpers
 
-    private func block(start: Double, end: Double, text: String) -> StoredBlock {
+    private func block(start: Double, end: Double, text: String, chapterIndex: Int? = nil) -> StoredBlock {
         StoredBlock(
             startTime:    timestampString(start),
             endTime:      timestampString(end),
             startSeconds: start,
             endSeconds:   end,
-            text:         text
+            text:         text,
+            chapterIndex: chapterIndex
         )
     }
 

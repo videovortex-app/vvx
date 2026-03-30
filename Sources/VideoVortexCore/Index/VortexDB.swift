@@ -127,6 +127,25 @@ public struct StoredBlock: Sendable, Equatable {
     /// Derived from `end_time` SRT timestamp at load time (seconds since video start).
     public let endSeconds: Double
     public let text: String
+    /// Zero-based index into the parent video's `chapters` array.
+    /// `nil` when the block precedes all chapter markers, or when `vvx reindex` has not been run.
+    public let chapterIndex: Int?
+
+    public init(
+        startTime:    String,
+        endTime:      String,
+        startSeconds: Double,
+        endSeconds:   Double,
+        text:         String,
+        chapterIndex: Int? = nil
+    ) {
+        self.startTime    = startTime
+        self.endTime      = endTime
+        self.startSeconds = startSeconds
+        self.endSeconds   = endSeconds
+        self.text         = text
+        self.chapterIndex = chapterIndex
+    }
 }
 
 /// Lightweight video row for structural analysis fan-out.
@@ -141,6 +160,14 @@ public struct VideoSummary: Sendable {
     public let uploadDate:      String?
     public let videoPath:       String?
     public let durationSeconds: Int?
+    /// Chapter markers from the video creator, decoded from the `chapters` JSON blob.
+    public let chapters:        [VideoChapter]
+    /// View count at index time. `nil` when not scraped.
+    public let viewCount:       Int?
+    /// Like count at index time. `nil` when not scraped or platform does not expose it.
+    public let likeCount:       Int?
+    /// Comment count at index time. `nil` when not scraped or platform does not expose it.
+    public let commentCount:    Int?
 }
 
 // MARK: - Errors
@@ -783,7 +810,7 @@ public actor VortexDB {
     /// each search hit without re-reading the SRT file from disk.
     public func blocksForVideo(videoId: String) throws -> [StoredBlock] {
         let sql = """
-            SELECT start_time, end_time, start_seconds, text
+            SELECT start_time, end_time, start_seconds, chapter_index, text
             FROM transcript_blocks
             WHERE video_id = ?
             ORDER BY CAST(start_seconds AS REAL);
@@ -798,7 +825,8 @@ public actor VortexDB {
                     endTime:      endTimeStr,
                     startSeconds: Double(dbColumnText(stmt, 2) ?? "0") ?? 0,
                     endSeconds:   srtTimestampToSeconds(endTimeStr),
-                    text:         dbColumnText(stmt, 3) ?? ""
+                    text:         dbColumnText(stmt, 4) ?? "",
+                    chapterIndex: dbColumnOptInt(stmt, 3)
                 ))
             }
             return blocks
@@ -888,7 +916,8 @@ public actor VortexDB {
         afterDate: String? = nil
     ) throws -> [VideoSummary] {
         let sql = """
-            SELECT id, title, uploader, platform, upload_date, video_path, duration_seconds
+            SELECT id, title, uploader, platform, upload_date, video_path, duration_seconds,
+                   chapters, view_count, like_count, comment_count
             FROM videos
             WHERE (?1 IS NULL OR platform    = ?1)
               AND (?2 IS NULL OR uploader    = ?2)
@@ -908,7 +937,11 @@ public actor VortexDB {
                     platform:        dbColumnText(stmt, 3),
                     uploadDate:      dbColumnText(stmt, 4),
                     videoPath:       dbColumnText(stmt, 5),
-                    durationSeconds: dbColumnOptInt(stmt, 6)
+                    durationSeconds: dbColumnOptInt(stmt, 6),
+                    chapters:        dbParseChapters(dbColumnText(stmt, 7)),
+                    viewCount:       dbColumnOptInt(stmt, 8),
+                    likeCount:       dbColumnOptInt(stmt, 9),
+                    commentCount:    dbColumnOptInt(stmt, 10)
                 ))
             }
             return rows
