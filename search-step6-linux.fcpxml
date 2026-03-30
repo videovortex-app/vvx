@@ -1,0 +1,40 @@
+<?xml version="1.0" encoding="UTF-8"?>
+<!DOCTYPE fcpxml>
+<fcpxml version="1.9">
+  <resources>
+    <format id="r1" name="FFVideoFormat1080p2997" frameDuration="1001/30000s" width="1920" height="1080" colorSpace="1-1-1 (Rec. 709)"/>
+    <asset id="r2" name="Transformers, the tech behind LLMs Deep Learning Chapter" uid="f84be89895ea7ef1450ab90ae88590eb" src="file:///root/Videos/VideoVortex%20Archives/Youtube/3Blue1Brown/2024-04-01%20-%20Transformers,%20the%20tech%20behind%20LLMs%20%EF%BD%9C%20Deep%20Learning%20Chapter%205/Transformers,%20the%20tech%20behind%20LLMs%20%EF%BD%9C%20Deep%20Learning%20Chapter.mp4" start="0s" duration="1634s" hasVideo="1" hasAudio="1">
+      <media-rep kind="original-media" src="file:///root/Videos/VideoVortex%20Archives/Youtube/3Blue1Brown/2024-04-01%20-%20Transformers,%20the%20tech%20behind%20LLMs%20%EF%BD%9C%20Deep%20Learning%20Chapter%205/Transformers,%20the%20tech%20behind%20LLMs%20%EF%BD%9C%20Deep%20Learning%20Chapter.mp4"/>
+    </asset>
+  </resources>
+  <library>
+    <event name="VVX: attention 2026-03-30">
+      <project name="attention" uid="6e8956ae1f1f4fd99ede82ae26a1d9f8">
+        <sequence format="r1" duration="44402/1000s" tcStart="0s" tcFormat="NDF" audioLayout="stereo" audioRate="48k">
+          <spine>
+            <clip name="01. 3Blue1Brown — between attention blocks and multi-layer perceptron blocks," ref="r2" offset="0s" duration="9233/1000s" start="314237/1000s">
+              <note>between attention blocks and multi-layer perceptron blocks,</note>
+              <marker start="314237/1000s" duration="1001/30000s" value="Inside a transformer"/>
+            </clip>
+            <clip name="02. 3Blue1Brown — which is going to focus on the attention blocks," ref="r2" offset="9233/1000s" duration="8036/1000s" start="415626/1000s">
+              <note>which is going to focus on the attention blocks,</note>
+              <marker start="415626/1000s" duration="1001/30000s" value="Chapter layout"/>
+            </clip>
+            <clip name="03. 3Blue1Brown — full of tunable parameters, then understanding the attention mechanism," ref="r2" offset="17269/1000s" duration="9985/1000s" start="1580577/1000s">
+              <note>full of tunable parameters, then understanding the attention mechanism,</note>
+              <marker start="1580577/1000s" duration="1001/30000s" value="Up next"/>
+            </clip>
+            <clip name="04. 3Blue1Brown — In the meantime, if you want to dive into attention," ref="r2" offset="27254/1000s" duration="7898/1000s" start="1604810/1000s">
+              <note>In the meantime, if you want to dive into attention,</note>
+              <marker start="1604810/1000s" duration="1001/30000s" value="Up next"/>
+            </clip>
+            <clip name="05. 3Blue1Brown — The attention block is what's responsible for figuring out which" ref="r2" offset="35152/1000s" duration="9250/1000s" start="249260/1000s">
+              <note>The attention block is what's responsible for figuring out which</note>
+              <marker start="249260/1000s" duration="1001/30000s" value="Inside a transformer"/>
+            </clip>
+          </spine>
+        </sequence>
+      </project>
+    </event>
+  </library>
+</fcpxml>
