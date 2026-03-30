@@ -41,6 +41,10 @@ let package = Package(
             url: "https://github.com/apple/swift-log.git",
             from: "1.0.0"
         ),
+        .package(
+            url: "https://github.com/apple/swift-crypto.git",
+            from: "3.5.0"
+        ),
     ],
     targets: [
 
@@ -58,6 +62,7 @@ let package = Package(
             name: "VideoVortexCore",
             dependencies: [
                 .product(name: "Logging", package: "swift-log"),
+                .product(name: "Crypto", package: "swift-crypto"),
                 "CSQLite",
             ],
             path: "Sources/VideoVortexCore",

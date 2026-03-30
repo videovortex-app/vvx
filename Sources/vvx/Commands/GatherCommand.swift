@@ -2,33 +2,11 @@ import ArgumentParser
 import Foundation
 import VideoVortexCore
 
-// MARK: - Snap mode
+// MARK: - SnapMode CLI conformance
 
-enum SnapMode: String, ExpressibleByArgument, CaseIterable {
-    case off
-    case block
-    case chapter
-}
-
-// MARK: - GatherResolvedClip (single source of truth for time math)
-
-/// Resolved clip window computed once per hit, used by dry-run, NDJSON, stderr, and ffmpeg.
-private struct GatherResolvedClip: Sendable {
-    let hit: SearchHit
-    /// Final logical start/end from Step 3 snap/context resolution.
-    /// Step 4 pad is applied on top of these by FFmpegRunner.paddedBounds.
-    let resolvedStartSeconds: Double
-    let resolvedEndSeconds: Double
-    /// Actual snap mode applied (may differ from requested if fallback occurred).
-    let snapApplied: SnapMode
-    /// Original FTS cue bounds — used for stderr delta reporting.
-    let cueStartSeconds: Double
-    let cueEndSeconds: Double
-    /// Optional note for throttled stderr (e.g. chapter title).
-    let snapNote: String?
-
-    var plannedDuration: Double { resolvedEndSeconds - resolvedStartSeconds }
-}
+/// `SnapMode` lives in VideoVortexCore without ArgumentParser dependency.
+/// This extension adds the `ExpressibleByArgument` conformance needed for `@Option`.
+extension SnapMode: ExpressibleByArgument {}
 
 // MARK: - NDJSON models (CLI layer only)
 
@@ -113,7 +91,7 @@ private struct GatherBudgetSkipEntry: Encodable {
 // MARK: - Internal plan + worker outcome
 
 private struct GatherClipPlan: Sendable {
-    let resolved: GatherResolvedClip
+    let resolved: ResolvedClip
     let outputPath: String
     let index: Int
     let total: Int
@@ -146,7 +124,7 @@ private enum GatherWorkerOutcome: Sendable {
 
 // MARK: - Command
 
-/// Phase 3.5 Step 4: editor sidecars (--pad, re-timed SRT, manifest.json, clips.md).
+/// Phase 3.5 Step 5.5: gather orchestration using shared ClipWindowResolver.
 struct GatherCommand: AsyncParsableCommand {
     static let configuration = CommandConfiguration(
         commandName: "gather",
@@ -324,13 +302,16 @@ struct GatherCommand: AsyncParsableCommand {
             return
         }
 
-        // 6 — Resolve windows (GatherResolvedClip) for every hit.
-        let snapMode = snap
-        let ctxSec   = contextSeconds
-        let resolved = resolveWindows(hits: hits, snapMode: snapMode, contextSeconds: ctxSec)
+        // 6 — Resolve windows via shared ClipWindowResolver; print any warnings.
+        let (resolved, resolveWarnings) = ClipWindowResolver.resolveWindows(
+            hits:           hits,
+            snapMode:       snap,
+            contextSeconds: contextSeconds
+        )
+        for w in resolveWarnings { stderrLine(w) }
 
         // 7 — Partition: clippable vs skipped (missing local file).
-        var clippable: [GatherResolvedClip] = []
+        var clippable: [ResolvedClip] = []
         var skippedCount = 0
 
         for rc in resolved {
@@ -344,9 +325,9 @@ struct GatherCommand: AsyncParsableCommand {
                         message: "Source video not on disk for \(rc.hit.videoId). Download it first.",
                         agentAction: "Run 'vvx fetch \"\(rc.hit.videoId)\" --archive' to download the video, then retry gather."
                     ),
-                    videoId: rc.hit.videoId,
+                    videoId:   rc.hit.videoId,
                     startTime: rc.hit.startTime,
-                    endTime: rc.hit.endTime
+                    endTime:   rc.hit.endTime
                 ))
             }
         }
@@ -357,7 +338,10 @@ struct GatherCommand: AsyncParsableCommand {
         if clippable.isEmpty { return }
 
         // 8 — Apply budget cap (--max-total-duration).
-        let (budgetClippable, budgetSkipped) = applyBudgetCap(clippable)
+        let (budgetClippable, budgetSkipped) = ClipWindowResolver.applyBudgetCap(
+            clippable,
+            maxTotalDuration: maxTotalDuration
+        )
 
         for bs in budgetSkipped {
             printNDJSON(GatherBudgetSkipEntry(
@@ -465,11 +449,11 @@ struct GatherCommand: AsyncParsableCommand {
                 let captured = plan
                 group.addTask {
                     return await Self.extractClip(
-                        plan: captured,
+                        plan:       captured,
                         ffmpegPath: resolvedFfmpeg,
-                        fast: useFast,
-                        exact: useExactMode,
-                        pad: padValue,
+                        fast:       useFast,
+                        exact:      useExactMode,
+                        pad:        padValue,
                         thumbnails: useThumbnails
                     )
                 }
@@ -576,7 +560,6 @@ struct GatherCommand: AsyncParsableCommand {
             // Shell-safe reproduce command (copy-paste ready, includes Step 5 flags when used).
             let srcPath     = hit.videoPath ?? "UNKNOWN_PATH"
             var reproducCmd = "vvx clip \"\(srcPath)\" --start \(rc.resolvedStartSeconds) --end \(rc.resolvedEndSeconds) --pad \(padValue)"
-            // Append encode-mode flag only when it differs from the default re-encode.
             if p.encodeMode == "copy"  { reproducCmd += " --fast" }
             if p.encodeMode == "exact" { reproducCmd += " --exact" }
             if useThumbnails  { reproducCmd += " --thumbnails" }
@@ -650,157 +633,6 @@ struct GatherCommand: AsyncParsableCommand {
         }
     }
 
-    // MARK: - Window resolution (GatherResolvedClip)
-
-    /// Compute `GatherResolvedClip` for every hit.
-    /// Emits throttled stderr lines for chapter snap when bounds meaningfully shift.
-    private func resolveWindows(
-        hits: [SearchHit],
-        snapMode: SnapMode,
-        contextSeconds: Double
-    ) -> [GatherResolvedClip] {
-        var snapNoteCount = 0
-        let snapNoteMax = 5
-
-        return hits.compactMap { hit in
-            let cueStart = hit.startSeconds
-            let cueEnd   = GatherPathNaming.parseSRTTimestampToSeconds(hit.endTime)
-                ?? (hit.startSeconds + 10)
-            let durationMax = hit.videoDurationSeconds.map { Double($0) } ?? Double.greatestFiniteMagnitude
-
-            switch snapMode {
-            case .off:
-                let start = max(0, cueStart - contextSeconds)
-                let end   = min(durationMax, cueEnd + contextSeconds)
-                guard end > start else {
-                    stderrLine("⚠ Skipping hit at \(hit.startTime) (invalid resolved window after context).")
-                    return nil
-                }
-                return GatherResolvedClip(
-                    hit: hit,
-                    resolvedStartSeconds: start,
-                    resolvedEndSeconds: end,
-                    snapApplied: .off,
-                    cueStartSeconds: cueStart,
-                    cueEndSeconds: cueEnd,
-                    snapNote: nil
-                )
-
-            case .block:
-                let start = cueStart
-                let end   = min(durationMax, cueEnd)
-                guard end > start else {
-                    stderrLine("⚠ Skipping hit at \(hit.startTime) (zero-width cue block).")
-                    return nil
-                }
-                return GatherResolvedClip(
-                    hit: hit,
-                    resolvedStartSeconds: start,
-                    resolvedEndSeconds: end,
-                    snapApplied: .block,
-                    cueStartSeconds: cueStart,
-                    cueEndSeconds: cueEnd,
-                    snapNote: nil
-                )
-
-            case .chapter:
-                // Resolve chapter index → chapter bounds.
-                guard let idx = hit.chapterIndex,
-                      !hit.chapters.isEmpty,
-                      idx >= 0,
-                      idx < hit.chapters.count else {
-                    // Fallback: block bounds + stderr warning (throttled).
-                    stderrLine("--snap chapter: missing chapter_index for hit at \(hit.startTime) (\(hit.videoId)); using cue bounds (run vvx reindex for chapters).")
-                    let start = cueStart
-                    let end   = min(durationMax, cueEnd)
-                    return GatherResolvedClip(
-                        hit: hit,
-                        resolvedStartSeconds: start,
-                        resolvedEndSeconds: end,
-                        snapApplied: .block,
-                        cueStartSeconds: cueStart,
-                        cueEndSeconds: cueEnd,
-                        snapNote: nil
-                    )
-                }
-
-                let ch    = hit.chapters[idx]
-                let start = max(0, ch.startTime)
-                let rawEnd: Double
-                if let chEnd = ch.endTime {
-                    rawEnd = chEnd
-                } else if let dur = hit.videoDurationSeconds {
-                    rawEnd = Double(dur)
-                } else {
-                    rawEnd = durationMax
-                }
-                let end = min(durationMax, rawEnd)
-
-                // Degenerate chapter metadata — fall back to block.
-                guard end > start else {
-                    stderrLine("--snap chapter: degenerate chapter bounds for \"\(ch.title)\"; using cue bounds.")
-                    return GatherResolvedClip(
-                        hit: hit,
-                        resolvedStartSeconds: cueStart,
-                        resolvedEndSeconds: min(durationMax, cueEnd),
-                        snapApplied: .block,
-                        cueStartSeconds: cueStart,
-                        cueEndSeconds: cueEnd,
-                        snapNote: nil
-                    )
-                }
-
-                // Throttled "why" stderr: only when window shifted > 0.1s.
-                let shifted = abs(start - cueStart) > 0.1 || abs(end - cueEnd) > 0.1
-                let note: String? = shifted ? ch.title : nil
-                if shifted && snapNoteCount < snapNoteMax {
-                    let startFmt = TimeParser.formatHHMMSS(start)
-                    let endFmt   = TimeParser.formatHHMMSS(end)
-                    let cueSFmt  = TimeParser.formatHHMMSS(cueStart)
-                    let cueEFmt  = TimeParser.formatHHMMSS(cueEnd)
-                    stderrLine("Snap: cue \(cueSFmt)–\(cueEFmt) → chapter \"\(ch.title)\" \(startFmt)–\(endFmt)")
-                    snapNoteCount += 1
-                    if snapNoteCount == snapNoteMax {
-                        stderrLine("… and more chapter snap(s) (omitted; same --snap chapter behavior).")
-                    }
-                }
-
-                return GatherResolvedClip(
-                    hit: hit,
-                    resolvedStartSeconds: start,
-                    resolvedEndSeconds: end,
-                    snapApplied: .chapter,
-                    cueStartSeconds: cueStart,
-                    cueEndSeconds: cueEnd,
-                    snapNote: note
-                )
-            }
-        }
-    }
-
-    // MARK: - Budget cap
-
-    private func applyBudgetCap(
-        _ clippable: [GatherResolvedClip]
-    ) -> (include: [GatherResolvedClip], skip: [GatherResolvedClip]) {
-        guard let cap = maxTotalDuration else {
-            return (clippable, [])
-        }
-        var accumulated = 0.0
-        var include: [GatherResolvedClip] = []
-        var skip: [GatherResolvedClip]    = []
-
-        for rc in clippable {
-            if skip.isEmpty && accumulated + rc.plannedDuration <= cap {
-                accumulated += rc.plannedDuration
-                include.append(rc)
-            } else {
-                skip.append(rc)
-            }
-        }
-        return (include, skip)
-    }
-
     // MARK: - Worker (runs inside TaskGroup child — no stdout/stderr)
 
     private static func extractClip(
@@ -851,13 +683,13 @@ struct GatherCommand: AsyncParsableCommand {
                 atPath: result.outputPath
             )[.size] as? Int64
             return .success(.init(
-                plan:                plan,
-                clipResult:          result,
-                sizeBytes:           size,
-                elapsed:             elapsed,
-                thumbnailPath:       thumbPath,
-                embedSourceApplied:  plan.sourceMetadata != nil,
-                encodeMode:          clipEncodeMode
+                plan:               plan,
+                clipResult:         result,
+                sizeBytes:          size,
+                elapsed:            elapsed,
+                thumbnailPath:      thumbPath,
+                embedSourceApplied: plan.sourceMetadata != nil,
+                encodeMode:         clipEncodeMode
             ))
         } catch let err as FFmpegRunner.ClipError {
             let elapsed = Date().timeIntervalSince(wallStart)
@@ -885,7 +717,7 @@ struct GatherCommand: AsyncParsableCommand {
         } catch {
             let elapsed = Date().timeIntervalSince(wallStart)
             return .failure(.init(
-                plan: plan,
+                plan:  plan,
                 error: VvxError(code: .clipFailed,
                                 message: "Clip extraction failed: \(error.localizedDescription)"),
                 elapsed: elapsed
@@ -955,7 +787,7 @@ struct GatherCommand: AsyncParsableCommand {
     // MARK: - Plan builder
 
     private func buildClipPlans(
-        resolved: [GatherResolvedClip],
+        resolved: [ResolvedClip],
         outputDir: String
     ) -> [GatherClipPlan] {
         let total       = resolved.count
