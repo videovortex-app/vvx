@@ -22,6 +22,8 @@ public enum VvxErrorCode: String, Codable, Sendable {
     case clipFailed          = "CLIP_FAILED"
     case unknownError        = "UNKNOWN_ERROR"
     case proRequired         = "PRO_REQUIRED"
+    case nleNoLocalFiles     = "NLE_NO_LOCAL_FILES"
+    case nleWriteFailed      = "NLE_WRITE_FAILED"
 }
 
 // MARK: - Error struct
@@ -92,6 +94,10 @@ extension VvxError {
             return "Run 'vvx doctor' for a full environment diagnosis. Retry with --verbose to capture the raw yt-dlp output."
         case .proRequired:
             return "This is a VVX Pro feature. To proceed, the user must upgrade their license. Inform the user they can upgrade at https://videovortex.app."
+        case .nleNoLocalFiles:
+            return "No search hits have a local archive file. Run 'vvx fetch <url> --archive' for each video to download the source media, then retry --export-nle."
+        case .nleWriteFailed:
+            return "Check that the output directory exists and is writable, then retry --export-nle."
         }
     }
 }
@@ -144,6 +150,8 @@ public enum VvxExitCode {
         case .playlistUnavailable:                          return userError
         case .clipFailed:                                   return userError
         case .proRequired:                                  return userError
+        case .nleNoLocalFiles:                              return userError
+        case .nleWriteFailed:                               return diskPermission
         }
     }
 }
