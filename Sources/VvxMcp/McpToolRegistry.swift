@@ -33,6 +33,7 @@ final class McpToolRegistry: Sendable {
             searchDefinition,
             syncDefinition,
             clipDefinition,
+            gatherDefinition,
             libraryDefinition,
             sqlDefinition,
             reindexDefinition,
@@ -49,6 +50,7 @@ final class McpToolRegistry: Sendable {
         case "search":  return try await SearchTool.call(arguments: arguments)
         case "sync":    return try await SyncTool.call(arguments: arguments)
         case "clip":    return try await ClipTool.call(arguments: arguments)
+        case "gather":  return try await GatherTool.call(arguments: arguments)
         case "library": return try await LibraryTool.call(arguments: arguments)
         case "sql":     return try await SqlTool.call(arguments: arguments)
         case "reindex": return try await ReindexTool.call(arguments: arguments)
@@ -319,6 +321,117 @@ final class McpToolRegistry: Sendable {
                 ]
             ],
             "required": ["inputPath", "start", "end"]
+        ]
+    ]}
+
+    private var gatherDefinition: [String: Any] {[
+        "name": "gather",
+        "description": """
+        Batch-extract clips from your local vortex.db archive as frame-accurate MP4 files. \
+        Searches indexed transcripts or chapter titles, resolves clip windows, and runs up to \
+        4 concurrent ffmpeg extractions. Writes per-clip re-timed SRT subtitles, manifest.json, \
+        and clips.md to an auto-named output folder on ~/Desktop.
+
+        TIMEOUT WARNING: Each clip takes 5–60 seconds depending on length and encode mode. \
+        For batches > 5 clips, use dryRun=true first to preview planned clips, then re-call \
+        without dryRun. For very large batches (>20 clips), have the user run 'vvx gather …' \
+        in Terminal — no timeout on the CLI.
+
+        PRO FEATURE: gather is a Pro feature. During Public Beta (Step 11 not yet shipped), \
+        all users may use gather freely.
+
+        The last NDJSON line is always a summary with outputDir and manifestPath. \
+        manifestPath is null for dry-runs or zero-success runs. \
+        Partial failures appear as success:false lines — the run does not abort on one failure. \
+        Agents should present manifestPath to the user as the handoff artifact for NLE editors.
+        """,
+        "inputSchema": [
+            "type": "object",
+            "properties": [
+                "query": [
+                    "type": "string",
+                    "description": "FTS5 query. Required. Supports AND, OR, NOT, phrase (quoted), prefix*."
+                ],
+                "limit": [
+                    "type": "integer",
+                    "description": "REQUIRED. Max clips to extract. Keep ≤ 5 for live extraction to avoid MCP timeouts."
+                ],
+                "dryRun": [
+                    "type": "boolean",
+                    "default": false,
+                    "description": "Plan-only: skip ffmpeg, return planned paths and timing."
+                ],
+                "platform": [
+                    "type": "string",
+                    "description": "Filter by platform (e.g. YouTube, TikTok)."
+                ],
+                "after": [
+                    "type": "string",
+                    "description": "Only include videos uploaded on or after YYYY-MM-DD."
+                ],
+                "uploader": [
+                    "type": "string",
+                    "description": "Filter by uploader or channel name (exact match)."
+                ],
+                "minViews": [
+                    "type": "integer",
+                    "description": "Only gather clips from videos with at least this many views."
+                ],
+                "minLikes": [
+                    "type": "integer",
+                    "description": "Only gather clips from videos with at least this many likes."
+                ],
+                "minComments": [
+                    "type": "integer",
+                    "description": "Only gather clips from videos with at least this many comments."
+                ],
+                "contextSeconds": [
+                    "type": "number",
+                    "default": 1.0,
+                    "description": "Seconds before/after matched cue. Ignored with snap block/chapter."
+                ],
+                "snap": [
+                    "type": "string",
+                    "enum": ["off", "block", "chapter"],
+                    "default": "off",
+                    "description": "off=cue+context; block=exact cue bounds; chapter=full chapter span."
+                ],
+                "maxTotalDuration": [
+                    "type": "number",
+                    "description": "Hard cap on total clip seconds. Lower-relevance clips dropped first."
+                ],
+                "pad": [
+                    "type": "number",
+                    "default": 2.0,
+                    "description": "NLE handle seconds before/after logical in/out. Clamped at 0."
+                ],
+                "fast": [
+                    "type": "boolean",
+                    "default": false,
+                    "description": "Keyframe seek + stream copy. Instant but ±2–5 s drift."
+                ],
+                "exact": [
+                    "type": "boolean",
+                    "default": false,
+                    "description": "libx264 CRF 18 re-encode — frame-accurate, slow. Mutually exclusive with fast."
+                ],
+                "thumbnails": [
+                    "type": "boolean",
+                    "default": false,
+                    "description": "Extract one JPEG still per clip at logical clip start."
+                ],
+                "embedSource": [
+                    "type": "boolean",
+                    "default": false,
+                    "description": "Embed source URL, title, and uploader into MP4 metadata atoms."
+                ],
+                "chaptersOnly": [
+                    "type": "boolean",
+                    "default": false,
+                    "description": "Search chapter titles; extract full chapter spans. Implies snap=chapter."
+                ]
+            ],
+            "required": ["query", "limit"]
         ]
     ]}
 
