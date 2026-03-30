@@ -37,6 +37,11 @@ struct SearchCommand: AsyncParsableCommand {
           vvx search --after 2025-01-01 --longest-monologue --monologue-gap 3.0
           vvx search --uploader "Joe Rogan" --high-density --density-window 30 --limit 5
 
+        Proximity search (explicit AND required):
+          vvx search "AGI AND security" --within 30
+          vvx search "Tesla AND autopilot" --within 45 --uploader "Lex Fridman"
+          vvx search "neuralink AND FDA" --within 60 --after 2024-01-01 --limit 10
+
         Examples:
           vvx search "artificial general intelligence"
           vvx search "AGI" --limit 20
@@ -49,12 +54,14 @@ struct SearchCommand: AsyncParsableCommand {
           vvx search "AGI" --export-nle fcpx --export-nle-out ~/Desktop/agi.fcpxml --dry-run
           vvx search --uploader "Lex Fridman" --longest-monologue --limit 5
           vvx search --platform YouTube --high-density --density-window 30 --limit 10
+          vvx search "AGI AND security" --within 30
+          vvx search "Tesla AND autopilot" --within 45 --uploader "Lex Fridman"
         """
     )
 
     // MARK: - Base search flags
 
-    @Argument(help: "FTS5 search query. Required for keyword search and NLE export. Not required when using --longest-monologue or --high-density.")
+    @Argument(help: "FTS5 search query. Required for keyword search, NLE export, and proximity (--within). Not required when using --longest-monologue or --high-density.")
     var query: String?
 
     @Option(name: .long, help: "Maximum number of results to return (default: 50).")
@@ -125,17 +132,28 @@ struct SearchCommand: AsyncParsableCommand {
             help: "Sliding window width in seconds for --high-density scoring. Use 30 for tight highlight-reel clips. Default: 60.0. Must be > 0.")
     var densityWindow: Double = 60.0
 
+    // MARK: - Proximity search flag (Phase 2 — Step 8)
+
+    @Option(name: .customLong("within"),
+            help: """
+            Proximity window in seconds. Activates only when the query contains explicit \
+            AND (e.g. 'AGI AND security'). Results sorted by tightest collision first \
+            (smallest proximitySpanSeconds). Must be > 0.
+            """)
+    var within: Double?
+
     // MARK: - Run
 
     mutating func run() async throws {
         let isStructural = longestMonologue || highDensity
+        let isProximity  = within != nil
 
         // --- Mutual-exclusion validation (runs before any DB open) ----------
 
-        guard isStructural || query != nil else {
+        guard isStructural || isProximity || query != nil else {
             emitError(code: .parseError,
-                      message: "A search query is required when neither --longest-monologue nor --high-density is specified.",
-                      agentAction: "Provide a search query string, or use --longest-monologue / --high-density for structural analysis.")
+                      message: "A search query is required when no structural or proximity flag is specified.",
+                      agentAction: "Provide a search query string, or use --longest-monologue / --high-density / --within for structural/proximity search.")
             throw ExitCode(VvxExitCode.userError)
         }
         if isStructural, query != nil {
@@ -150,10 +168,28 @@ struct SearchCommand: AsyncParsableCommand {
                       agentAction: "Use --longest-monologue OR --high-density — not both in the same command.")
             throw ExitCode(VvxExitCode.userError)
         }
-        if isStructural, exportNle != nil {
+        if isStructural && isProximity {
             emitError(code: .parseError,
-                      message: "--export-nle cannot be combined with --longest-monologue or --high-density.",
-                      agentAction: "Use a keyword query with --export-nle, or use the structural flag alone.")
+                      message: "--within cannot be combined with --longest-monologue or --high-density.",
+                      agentAction: "Use --within with a keyword query, or use --longest-monologue / --high-density alone.")
+            throw ExitCode(VvxExitCode.userError)
+        }
+        if isProximity, query == nil {
+            emitError(code: .parseError,
+                      message: "--within requires a search query with explicit AND (e.g. 'AGI AND security').",
+                      agentAction: "Provide a query string with AND, e.g. vvx search \"AGI AND security\" --within 30")
+            throw ExitCode(VvxExitCode.userError)
+        }
+        if let w = within, w <= 0 {
+            emitError(code: .parseError,
+                      message: "--within must be > 0.",
+                      agentAction: "--within must be a positive number of seconds (e.g. --within 30).")
+            throw ExitCode(VvxExitCode.userError)
+        }
+        if (isStructural || isProximity), exportNle != nil {
+            emitError(code: .parseError,
+                      message: "--export-nle cannot be combined with structural or proximity flags.",
+                      agentAction: "Use a keyword query with --export-nle, or use the structural/proximity flag alone.")
             throw ExitCode(VvxExitCode.userError)
         }
         if monologueGap < 0 {
@@ -175,6 +211,10 @@ struct SearchCommand: AsyncParsableCommand {
             try await runStructuralSearch()
             return
         }
+        if isProximity {
+            try await runProximitySearch()
+            return
+        }
 
         if exportNle != nil || exportNleOut != nil {
             try await runNLEExport()
@@ -182,61 +222,7 @@ struct SearchCommand: AsyncParsableCommand {
         }
 
         // --- Standard JSON / RAG branch -------------------------------------
-        guard maxTokens == nil || rag else {
-            printNDJSON(SearchErrorEnvelope(
-                query: query ?? "",
-                message: "--max-tokens requires --rag."
-            ))
-            throw ExitCode(VvxExitCode.userError)
-        }
-
-        fputs("Searching vortex.db…\n", stderr)
-
-        let db: VortexDB
-        do {
-            db = try VortexDB.open()
-        } catch {
-            let envelope = SearchErrorEnvelope(
-                query:   query ?? "",
-                message: "Could not open vortex.db: \(error.localizedDescription)"
-            )
-            printNDJSON(envelope)
-            throw ExitCode(1)
-        }
-
-        let output: SearchOutput
-        do {
-            output = try await SRTSearcher.search(
-                query:     query ?? "",
-                db:        db,
-                platform:  platform,
-                afterDate: after,
-                uploader:  uploader,
-                limit:     limit
-            )
-        } catch {
-            let envelope = SearchErrorEnvelope(
-                query:   query ?? "",
-                message: "Search failed: \(error.localizedDescription)"
-            )
-            printNDJSON(envelope)
-            throw ExitCode(1)
-        }
-
-        fputs("Found \(output.totalMatches) result(s).\n", stderr)
-
-        if rag {
-            let markdown = SRTSearcher.ragMarkdown(
-                query:              query ?? "",
-                results:            output.results,
-                totalBeforeBudget:  output.totalMatches,
-                maxTokens:          maxTokens,
-                versionString:      vvxDocsVersion
-            )
-            print(markdown)
-        } else {
-            print(output.jsonString())
-        }
+        try await runStandardFTS()
     }
 
     // MARK: - Structural search
@@ -373,6 +359,209 @@ struct SearchCommand: AsyncParsableCommand {
         ))
 
         fputs("Found \(topResults.count) result(s) from \(summaries.count) video(s).\n", stderr)
+    }
+
+    // MARK: - Proximity search
+
+    private mutating func runProximitySearch() async throws {
+        let withinSeconds = within!   // validated > 0 by guard block
+
+        // Parse AND-separated terms (case-insensitive split, trimmed).
+        let rawTerms = (query ?? "")
+            .components(separatedBy: " AND ")
+            .map { $0.trimmingCharacters(in: .whitespacesAndNewlines) }
+            .filter { !$0.isEmpty }
+
+        guard rawTerms.count >= 2 else {
+            // Single term — no proximity possible; fall through to standard FTS.
+            fputs("Note: --within requires at least two terms joined by AND. Running standard search.\n", stderr)
+            try await runStandardFTS()
+            return
+        }
+
+        // Open DB.
+        let db: VortexDB
+        do {
+            db = try VortexDB.open()
+        } catch {
+            emitError(code: .indexCorrupt,
+                      message: "Could not open vortex.db: \(error.localizedDescription)")
+            throw ExitCode(VvxExitCode.forErrorCode(.indexCorrupt))
+        }
+
+        fputs("Running proximity search: \(rawTerms.joined(separator: " AND ")) within \(withinSeconds)s…\n", stderr)
+
+        // Per-term FTS5 sub-queries.
+        // Generous sub-query limit for proximity fan-out (scan all candidate hits per term).
+        let subLimit = max(1000, limit * 50)
+        var termHitsByVideo: [String: [String: [ProximityHit]]] = [:]
+        var videoMeta: [String: SearchHit] = [:]   // videoId → first hit (for metadata)
+
+        for term in rawTerms {
+            let hits: [SearchHit]
+            do {
+                hits = try await db.search(
+                    query:     term,
+                    platform:  platform,
+                    afterDate: after,
+                    uploader:  uploader,
+                    limit:     subLimit
+                )
+            } catch {
+                emitError(code: .indexEmpty,
+                          message: "Sub-query for term '\(term)' failed: \(error.localizedDescription)")
+                throw ExitCode(VvxExitCode.forErrorCode(.indexEmpty))
+            }
+            for hit in hits {
+                let pHit = ProximityHit(
+                    term:         term,
+                    startSeconds: hit.startSeconds,
+                    endSeconds:   hit.endSeconds,
+                    text:         hit.text
+                )
+                termHitsByVideo[hit.videoId, default: [:]][term, default: []].append(pHit)
+                if videoMeta[hit.videoId] == nil { videoMeta[hit.videoId] = hit }
+            }
+        }
+
+        // Keep only videos where ALL required terms have at least one hit.
+        let candidateVideos = termHitsByVideo.filter { $0.value.keys.count == rawTerms.count }
+
+        fputs("Found \(candidateVideos.count) video(s) with all terms present. Scanning for tightest windows…\n", stderr)
+
+        // Fan-out: find the tightest window per candidate video.
+        struct ProximityResult {
+            let videoId: String
+            let meta:    SearchHit
+            let window:  ProximityWindow
+        }
+
+        var results: [ProximityResult] = []
+
+        for (videoId, termHitsForVideo) in candidateVideos {
+            let blocks: [StoredBlock]
+            do {
+                blocks = try await db.blocksForVideo(videoId: videoId)
+            } catch {
+                continue
+            }
+            if let window = ProximityAnalyzer.minimumWindow(
+                termHits:      termHitsForVideo,
+                withinSeconds: withinSeconds,
+                blocks:        blocks
+            ), let meta = videoMeta[videoId] {
+                results.append(ProximityResult(videoId: videoId, meta: meta, window: window))
+            }
+        }
+
+        // Sort ascending by proximitySpanSeconds (tightest first), apply limit.
+        results.sort { $0.window.proximitySpanSeconds < $1.window.proximitySpanSeconds }
+        let topResults = Array(results.prefix(limit))
+
+        // Emit per-result NDJSON.
+        for (i, r) in topResults.enumerated() {
+            let rank  = i + 1
+            let win   = r.window
+            let repro = reproduceCommand(videoPath: r.meta.videoPath,
+                                         start: win.startSeconds, end: win.endSeconds)
+            printNDJSON(ProximityResultLine(
+                rank:                 rank,
+                videoTitle:           r.meta.title,
+                uploader:             r.meta.uploader,
+                platform:             r.meta.platform,
+                uploadDate:           r.meta.uploadDate,
+                videoPath:            r.meta.videoPath,
+                startSeconds:         win.startSeconds,
+                endSeconds:           win.endSeconds,
+                proximitySpanSeconds: win.proximitySpanSeconds,
+                withinSeconds:        withinSeconds,
+                terms:                rawTerms,
+                termHits:             win.termHits.map {
+                    ProximityTermHitLine(term: $0.term, startSeconds: $0.startSeconds, text: $0.text)
+                },
+                structuralScore:      win.proximitySpanSeconds,
+                transcriptExcerpt:    win.transcriptExcerpt,
+                reproduceCommand:     repro
+            ))
+        }
+
+        // Emit summary NDJSON.
+        let noWindowNote = topResults.isEmpty && !candidateVideos.isEmpty
+        if noWindowNote {
+            fputs("No videos had all terms within \(withinSeconds)s. Try a larger --within value.\n", stderr)
+        }
+        printNDJSON(ProximitySummaryLine(
+            terms:           rawTerms,
+            withinSeconds:   withinSeconds,
+            candidateVideos: candidateVideos.count,
+            resultCount:     topResults.count,
+            limit:           limit,
+            uploader:        uploader,
+            platform:        platform,
+            afterDate:       after
+        ))
+
+        fputs("Found \(topResults.count) proximity window(s) across \(candidateVideos.count) candidate video(s).\n", stderr)
+    }
+
+    // MARK: - Standard FTS (shared by proximity fallback)
+
+    private mutating func runStandardFTS() async throws {
+        guard maxTokens == nil || rag else {
+            printNDJSON(SearchErrorEnvelope(
+                query: query ?? "",
+                message: "--max-tokens requires --rag."
+            ))
+            throw ExitCode(VvxExitCode.userError)
+        }
+
+        fputs("Searching vortex.db…\n", stderr)
+
+        let db: VortexDB
+        do {
+            db = try VortexDB.open()
+        } catch {
+            let envelope = SearchErrorEnvelope(
+                query:   query ?? "",
+                message: "Could not open vortex.db: \(error.localizedDescription)"
+            )
+            printNDJSON(envelope)
+            throw ExitCode(1)
+        }
+
+        let output: SearchOutput
+        do {
+            output = try await SRTSearcher.search(
+                query:     query ?? "",
+                db:        db,
+                platform:  platform,
+                afterDate: after,
+                uploader:  uploader,
+                limit:     limit
+            )
+        } catch {
+            let envelope = SearchErrorEnvelope(
+                query:   query ?? "",
+                message: "Search failed: \(error.localizedDescription)"
+            )
+            printNDJSON(envelope)
+            throw ExitCode(1)
+        }
+
+        fputs("Found \(output.totalMatches) result(s).\n", stderr)
+
+        if rag {
+            let markdown = SRTSearcher.ragMarkdown(
+                query:              query ?? "",
+                results:            output.results,
+                totalBeforeBudget:  output.totalMatches,
+                maxTokens:          maxTokens,
+                versionString:      vvxDocsVersion
+            )
+            print(markdown)
+        } else {
+            print(output.jsonString())
+        }
     }
 
     // MARK: - NLE export run
@@ -680,6 +869,47 @@ private struct StructuralSummaryLine: Encodable {
     let uploader:      String?
     let platform:      String?
     let afterDate:     String?
+}
+
+// MARK: - Proximity search NDJSON models (CLI layer only)
+
+private struct ProximityTermHitLine: Encodable {
+    let term:         String
+    let startSeconds: Double
+    let text:         String
+}
+
+private struct ProximityResultLine: Encodable {
+    let success              = true
+    let mode                 = "proximity"
+    let rank:                 Int
+    let videoTitle:           String
+    let uploader:             String?
+    let platform:             String?
+    let uploadDate:           String?
+    let videoPath:            String?
+    let startSeconds:         Double
+    let endSeconds:           Double
+    let proximitySpanSeconds: Double
+    let withinSeconds:        Double
+    let terms:                [String]
+    let termHits:             [ProximityTermHitLine]
+    let structuralScore:      Double
+    let transcriptExcerpt:    String
+    let reproduceCommand:     String
+}
+
+private struct ProximitySummaryLine: Encodable {
+    let success         = true
+    let mode            = "proximity"
+    let terms:           [String]
+    let withinSeconds:   Double
+    let candidateVideos: Int
+    let resultCount:     Int
+    let limit:           Int
+    let uploader:        String?
+    let platform:        String?
+    let afterDate:       String?
 }
 
 // MARK: - NDJSON models (NLE export — CLI layer only)

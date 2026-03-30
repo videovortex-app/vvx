@@ -446,7 +446,7 @@ private extension DocsCommand {
         #### Structural search mutual-exclusion rules
         - `--longest-monologue` and `--high-density` cannot be combined.
         - Neither flag can be combined with a query string.
-        - Neither flag can be combined with `--export-nle`.
+        - Neither flag can be combined with `--export-nle` or `--within`.
         - `--rag` cannot be used with structural flags.
         - `--uploader`, `--platform`, `--after`, and `--limit` are compatible with both flags.
 
@@ -454,6 +454,71 @@ private extension DocsCommand {
         A unified float for sorting/filtering in agent pipelines.
         - `longest_monologue`: span duration in seconds (higher = longer).
         - `high_density`: words per second (higher = denser).
+        - `proximity`: `proximitySpanSeconds` — **lower is better** (tighter collision).
+          Results are pre-sorted correctly; agents do not need to re-sort.
+
+        ### Proximity search (explicit AND required)
+
+        Finds the tightest temporal collision between multiple concepts — sorted by
+        `proximitySpanSeconds` ascending (smallest window first). Plain boolean search tells
+        you both words appear somewhere in a 3-hour podcast; proximity tells you the exact
+        22-second moment they meet.
+
+        Requires a query with explicit `AND`. Space-separated terms (e.g. `"Lex Fridman"`)
+        run normal FTS — use `AND` to enable proximity.
+
+        ```
+        vvx search "AGI AND security" --within 30
+        vvx search "Tesla AND autopilot" --within 45 --uploader "Lex Fridman"
+        vvx search "neuralink AND FDA" --within 60 --after 2024-01-01 --limit 10
+        ```
+
+        | Flag | Description |
+        |------|-------------|
+        | `--within <seconds>` | Maximum proximity window in seconds. Must be > 0. |
+
+        NDJSON output per result (one line per video, sorted by tightest window first):
+        ```json
+        {
+          "success": true,
+          "mode": "proximity",
+          "rank": 1,
+          "videoTitle": "Lex Fridman Podcast #400",
+          "uploader": "Lex Fridman",
+          "platform": "YouTube",
+          "uploadDate": "2024-11-15",
+          "videoPath": "/abs/path/to/video.mp4",
+          "startSeconds": 1823.4,
+          "endSeconds": 1847.9,
+          "proximitySpanSeconds": 22.1,
+          "withinSeconds": 30.0,
+          "terms": ["AGI", "security"],
+          "termHits": [
+            { "term": "AGI", "startSeconds": 1823.4, "text": "the trajectory of AGI development..." },
+            { "term": "security", "startSeconds": 1845.5, "text": "national security implications..." }
+          ],
+          "structuralScore": 22.1,
+          "transcriptExcerpt": "...first ~1000 chars spanning the window...",
+          "reproduceCommand": "vvx clip \\"/abs/path/video.mp4\\" --start 1823.4 --end 1847.9"
+        }
+        ```
+        Final summary line:
+        ```json
+        {"success":true,"mode":"proximity","terms":["AGI","security"],"withinSeconds":30.0,"candidateVideos":12,"resultCount":5,"limit":10,"uploader":null,"platform":null,"afterDate":null}
+        ```
+
+        #### Proximity search mutual-exclusion rules
+        - `--within` requires a query with explicit `AND` (at least 2 terms).
+        - `--within` cannot be combined with `--longest-monologue` or `--high-density`.
+        - `--within` cannot be combined with `--export-nle`.
+        - `--within` without a query is a parse error.
+        - `--within 0` or negative values are parse errors.
+        - Single-term `AND` query (e.g. `"AGI"`) with `--within`: stderr note, falls through to standard FTS.
+
+        #### Why proximity beats FTS5 NEAR
+        FTS5 `NEAR` operates within a **single SRT block** (~3–5 s). If "AGI" ends block N
+        and "security" starts block N+1, `NEAR` misses the collision. The `--within` sweep
+        is the only mathematically sound tool for cross-block temporal proximity.
 
         ### Agent rules for search
         - Use `--rag` when generating a user-facing answer from transcript content.
@@ -461,7 +526,11 @@ private extension DocsCommand {
           and `timestampEnd` from each hit.
         - Use `--longest-monologue` to find the best long-form rant or deep dive.
         - Use `--high-density` to find the moment a speaker hammers a topic hardest.
-        - For structural results, use `reproduceCommand` to cut the clip directly.
+        - Use `--within` to find where two or more concepts collide in time — this is the
+          goldilocks zone between phrase matching (too brittle) and boolean (too noisy).
+        - For structural and proximity results, use `reproduceCommand` to cut the clip directly.
+        - `structuralScore` polarity differs by mode: higher is better for monologue/density,
+          **lower is better for proximity** (tightest collision = smallest span).
         - `INDEX_EMPTY` error means no videos are indexed yet: run `vvx sync <url> --limit 10`.
         - For NLE export, source files must be on disk. Use `--dry-run` to check clip availability
           before writing the file.

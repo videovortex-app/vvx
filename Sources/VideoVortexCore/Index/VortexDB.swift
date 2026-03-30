@@ -85,6 +85,8 @@ public struct SearchHit: Sendable {
     public let startTime: String        // "00:14:32,000"
     public let endTime: String
     public let startSeconds: Double
+    /// Derived from `end_time` SRT timestamp at query time.
+    public let endSeconds: Double
     public let text: String             // matched block text
     public let relevanceScore: Double   // bm25() — lower (more negative) = more relevant
     // Resolved from the `videos` table in the same query JOIN.
@@ -746,14 +748,16 @@ public actor VortexDB {
 
             var hits: [SearchHit] = []
             while sqlite3_step(stmt) == SQLITE_ROW {
+                let endTimeStr = dbColumnText(stmt, 5) ?? ""
                 hits.append(SearchHit(
                     videoId:              dbColumnText(stmt, 0) ?? "",
                     title:                dbColumnText(stmt, 1) ?? "",
                     platform:             dbColumnText(stmt, 2),
                     uploader:             dbColumnText(stmt, 3),
                     startTime:            dbColumnText(stmt, 4) ?? "",
-                    endTime:              dbColumnText(stmt, 5) ?? "",
+                    endTime:              endTimeStr,
                     startSeconds:         Double(dbColumnText(stmt, 6) ?? "0") ?? 0,
+                    endSeconds:           srtTimestampToSeconds(endTimeStr),
                     text:                 dbColumnText(stmt, 7) ?? "",
                     relevanceScore:       sqlite3_column_double(stmt, 8),
                     videoPath:            dbColumnText(stmt, 9),
