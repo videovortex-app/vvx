@@ -34,6 +34,7 @@ final class McpToolRegistry: Sendable {
             syncDefinition,
             clipDefinition,
             gatherDefinition,
+            ingestDefinition,
             libraryDefinition,
             sqlDefinition,
             reindexDefinition,
@@ -51,6 +52,7 @@ final class McpToolRegistry: Sendable {
         case "sync":    return try await SyncTool.call(arguments: arguments)
         case "clip":    return try await ClipTool.call(arguments: arguments)
         case "gather":  return try await GatherTool.call(arguments: arguments)
+        case "ingest":  return try await IngestTool.call(arguments: arguments)
         case "library": return try await LibraryTool.call(arguments: arguments)
         case "sql":     return try await SqlTool.call(arguments: arguments)
         case "reindex": return try await ReindexTool.call(arguments: arguments)
@@ -460,6 +462,51 @@ final class McpToolRegistry: Sendable {
                 ]
             ],
             "required": ["query", "limit"]
+        ]
+    ]}
+
+    private var ingestDefinition: [String: Any] {[
+        "name": "ingest",
+        "description": """
+        Index local video files into vortex.db without moving or copying them. \
+        Recursively scans a folder for video files (.mp4 by default), matches sibling \
+        sidecars in the same directory (.srt for transcript, .info.json for yt-dlp-style \
+        metadata), and indexes each file using its absolute path. \
+        \n\
+        Sidecars must share the video's filename stem and directory. \
+        .en.srt (or .srt) → transcript_source "local". .info.json → title, uploader, etc. \
+        \n\
+        Returns NDJSON: one result line per video (indexed or skipped), ending with a \
+        type: "summary" line containing: indexed, skipped, skipped_reasons \
+        (keys non_video / invalid_sidecar / corrupt_media / already_indexed — all always \
+        present as integers ≥ 0), and malformed_info_json_count (always present). \
+        \n\
+        Agents should prefer dryRun=true on unfamiliar folder trees first to preview \
+        without writing to vortex.db or running any probes. \
+        With dryRun=true the summary line will include "dry_run":true. \
+        Partial failures (per-file) appear as success:false lines — the run never aborts \
+        on a single bad file. Fatal errors (path not found, not a directory) return a \
+        VvxErrorEnvelope.
+        """,
+        "inputSchema": [
+            "type": "object",
+            "properties": [
+                "path": [
+                    "type": "string",
+                    "description": "Absolute or relative path to the root folder to scan. Resolved to absolute before any DB write."
+                ],
+                "dryRun": [
+                    "type": "boolean",
+                    "default": false,
+                    "description": "Walk the folder and match sidecars without writing to vortex.db or running ffprobe. Recommended for previewing large or unfamiliar trees."
+                ],
+                "forceReindex": [
+                    "type": "boolean",
+                    "default": false,
+                    "description": "Bypass dedup check and re-upsert metadata for files already indexed in vortex.db."
+                ]
+            ],
+            "required": ["path"]
         ]
     ]}
 
