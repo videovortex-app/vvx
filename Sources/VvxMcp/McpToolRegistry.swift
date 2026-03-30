@@ -167,28 +167,32 @@ final class McpToolRegistry: Sendable {
     private var searchDefinition: [String: Any] {[
         "name": "search",
         "description": """
-        Full-text search across all indexed transcripts in vortex.db. \
-        Supports FTS5 syntax: boolean operators (AI AND danger), phrase search ("exact phrase"), \
-        Porter stemming (run matches running), and prefix wildcard (intell*). \
-        \n\
-        outputFormat is REQUIRED — choose deliberately: \
-        • "rag" — Markdown context document with per-hit attribution, timestamps, and ready-to-run \
-          vvx clip commands. Use when answering a user's question or injecting context into your window. \
-        • "json" — Structured SearchOutput JSON. Use when chaining results into the clip tool or a script. \
-        \n\
-        Use maxTokens with outputFormat="rag" to prevent context blowout on large result sets.
+        Full-text search, structural analysis, and proximity search across all indexed transcripts.
+
+        MODES:
+        • Standard FTS (default): Provide query + outputFormat.
+          outputFormat: "rag" = Markdown context for answering questions; "json" = structured SearchOutput for pipelines.
+        • Structural (no query needed): Set longestMonologue OR highDensity.
+          Returns top N spans sorted by duration (monologue) or words-per-second (density). Always JSON.
+        • Proximity: Provide query with explicit AND + set within (seconds).
+          Returns the tightest window where all terms co-occur, sorted ascending by proximitySpanSeconds.
+          Always JSON. structuralScore = proximitySpanSeconds — LOWER is better.
+
+        All structural/proximity result lines include videoId, transcriptExcerpt (≤ 1,000 chars), and
+        reproduceCommand. Pass transcriptExcerpt to an LLM to evaluate fit before calling gather.
+        Results are pre-sorted; agents should consume them in order without re-sorting.
         """,
         "inputSchema": [
             "type": "object",
             "properties": [
                 "query": [
                     "type": "string",
-                    "description": "FTS5 query. Supports AND, OR, NOT, phrase search (quoted), and prefix wildcard (word*)."
+                    "description": "FTS5 query. Supports AND, OR, NOT, phrase search (quoted), and prefix wildcard (word*). Optional when longestMonologue or highDensity is set."
                 ],
                 "outputFormat": [
                     "type": "string",
                     "enum": ["json", "rag"],
-                    "description": "REQUIRED. 'rag' for human-readable Markdown with clip commands; 'json' for structured data."
+                    "description": "Required for standard FTS. Ignored for structural/proximity (always returns JSON). 'rag' for human-readable Markdown with clip commands; 'json' for structured data."
                 ],
                 "limit": [
                     "type": "integer",
@@ -210,9 +214,33 @@ final class McpToolRegistry: Sendable {
                 "maxTokens": [
                     "type": "integer",
                     "description": "Maximum estimated tokens for rag output. Truncates hits before exceeding budget. Requires outputFormat='rag'."
+                ],
+                "longestMonologue": [
+                    "type": "boolean",
+                    "default": false,
+                    "description": "Find the longest continuous speech spans across all indexed videos. No query needed. Returns MonologueResultLine NDJSON sorted by duration descending."
+                ],
+                "highDensity": [
+                    "type": "boolean",
+                    "default": false,
+                    "description": "Find the highest words-per-second windows across all indexed videos. No query needed. Returns DensityResultLine NDJSON sorted by wordsPerSecond descending."
+                ],
+                "monologueGap": [
+                    "type": "number",
+                    "default": 1.5,
+                    "description": "Maximum silence gap (seconds) allowed between transcript blocks within the same monologue span. Used with longestMonologue."
+                ],
+                "densityWindow": [
+                    "type": "number",
+                    "default": 60.0,
+                    "description": "Sliding window width in seconds for high-density analysis. Used with highDensity."
+                ],
+                "within": [
+                    "type": "number",
+                    "description": "Proximity window in seconds. Requires query with at least two explicit AND terms. Returns the tightest co-occurrence window; must be > 0."
                 ]
             ],
-            "required": ["query", "outputFormat"]
+            "required": []
         ]
     ]}
 
