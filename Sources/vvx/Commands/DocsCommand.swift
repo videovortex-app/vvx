@@ -332,11 +332,42 @@ private extension DocsCommand {
         Token estimation: `wordCount × 1.3`. The `--max-tokens` budget is applied to
         the full RAG document; individual hit tokens are summed cumulatively.
 
+        ### NLE export (Pro)
+        Export a search result to Final Cut Pro (FCPXML), Premiere Pro (XMEML), or DaVinci Resolve (EDL) —
+        zero re-encode, infinite handles. References archive files on disk in-place.
+
+        ```
+        vvx search "neuralink" --export-nle fcpx     --export-nle-out ~/Desktop/cuts.fcpxml
+        vvx search "neuralink" --export-nle premiere --export-nle-out ~/Desktop/cuts.xml
+        vvx search "neuralink" --export-nle resolve  --export-nle-out ~/Desktop/cuts.edl
+        vvx search "neuralink" --export-nle fcpx     --export-nle-out ~/Desktop/cuts.fcpxml --dry-run
+        ```
+
+        Formats:
+        - `fcpx` → FCPXML 1.9 for Final Cut Pro (drag-and-drop import).
+        - `premiere` → XMEML v4 for Adobe Premiere Pro (File → Import).
+        - `resolve` → CMX 3600 EDL for DaVinci Resolve (File → Import Timeline → Pre-conformed EDL).
+
+        NLE export formats include:
+        - Clip names with uploader + transcript snippet (readable from timeline at any zoom).
+        - Chapter markers on the timeline when chapter data is present.
+        - Matched text as clip comments/notes.
+
+        NLE export final NDJSON line:
+        ```json
+        {"success":true,"format":"fcpx","outputPath":"/path/cuts.fcpxml","clipCount":8,"skippedCount":2,"totalDurationSeconds":142.5,"query":"neuralink","padSeconds":2.0,"reproduceCommand":"vvx search ..."}
+        ```
+
+        Clips with no local archive file are skipped (emit `NleSkipEntry` NDJSON + stderr warning).
+        Run `vvx fetch "<url>" --archive` to download missing source videos, then retry.
+
         ### Agent rules for search
         - Use `--rag` when generating a user-facing answer from transcript content.
         - Use JSON output when chaining into `clip` — extract `videoPath`, `timestamp`,
           and `timestampEnd` from each hit.
         - `INDEX_EMPTY` error means no videos are indexed yet: run `vvx sync <url> --limit 10`.
+        - For NLE export, source files must be on disk. Use `--dry-run` to check clip availability
+          before writing the file.
         """
     }
 }

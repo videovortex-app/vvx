@@ -25,9 +25,11 @@ struct SearchCommand: AsyncParsableCommand {
         with per-hit attribution and ready-to-run vvx clip commands.
 
         NLE export (Pro):
-          vvx search "neuralink" --export-nle fcpx --export-nle-out ~/Desktop/cuts.fcpxml
-          Opens in Final Cut Pro as a ready-to-cut project referencing archive files
-          in-place — zero re-encode, zero extra storage, infinite handles.
+          vvx search "neuralink" --export-nle fcpx     --export-nle-out ~/Desktop/cuts.fcpxml
+          vvx search "neuralink" --export-nle premiere --export-nle-out ~/Desktop/cuts.xml
+          vvx search "neuralink" --export-nle resolve  --export-nle-out ~/Desktop/cuts.edl
+          Imports into Final Cut Pro, Premiere Pro, or DaVinci Resolve as a ready-to-cut
+          project referencing archive files in-place — zero re-encode.
 
         Examples:
           vvx search "artificial general intelligence"
@@ -38,6 +40,8 @@ struct SearchCommand: AsyncParsableCommand {
           vvx search "interview" --uploader "Lex Fridman"
           vvx search "AGI" --rag
           vvx search "neuralink" --export-nle fcpx --export-nle-out ~/Desktop/cuts.fcpxml
+          vvx search "neuralink" --export-nle premiere --export-nle-out ~/Desktop/cuts.xml
+          vvx search "neuralink" --export-nle resolve --export-nle-out ~/Desktop/cuts.edl
           vvx search "AGI" --export-nle fcpx --export-nle-out ~/Desktop/agi.fcpxml --dry-run
         """
     )
@@ -67,18 +71,18 @@ struct SearchCommand: AsyncParsableCommand {
     @Option(name: .long, help: "Maximum estimated tokens for --rag output. Truncates hits before exceeding this budget. Requires --rag.")
     var maxTokens: Int?
 
-    // MARK: - NLE export flags (Step 6)
+    // MARK: - NLE export flags
 
     @Option(name: .customLong("export-nle"),
-            help: "NLE export format. Step 6 supports 'fcpx' (Final Cut Pro XML). Requires --export-nle-out.")
+            help: "NLE export format. Supported: fcpx (Final Cut Pro), premiere (Premiere Pro XML), resolve (DaVinci Resolve EDL). Requires --export-nle-out.")
     var exportNle: NleExportFormat?
 
     @Option(name: .customLong("export-nle-out"),
-            help: "Output path for the NLE export file (e.g. ~/Desktop/cuts.fcpxml). Required with --export-nle.")
+            help: "Output path for the NLE export file (e.g. ~/Desktop/cuts.fcpxml, ~/Desktop/cuts.xml, ~/Desktop/cuts.edl). Required with --export-nle.")
     var exportNleOut: String?
 
     @Option(name: .long,
-            help: "Seconds of handle before/after each cue; written as source in/out timecodes in FCPXML (default: 2.0).")
+            help: "Seconds of handle before/after each cue; written as source in/out timecodes in the exported NLE file (default: 2.0).")
     var pad: Double = 2.0
 
     @Option(name: .customLong("context-seconds"),
@@ -90,11 +94,11 @@ struct SearchCommand: AsyncParsableCommand {
     var snap: SnapMode = .off
 
     @Option(name: .customLong("frame-rate"),
-            help: "FCPXML sequence ruler frame rate (default: 29.97). Does not affect clip trim accuracy.")
+            help: "NLE display timebase: FCPXML sequence ruler, Premiere sequence, and EDL SMPTE timecode frame rate (default: 29.97). Does not affect clip trim accuracy.")
     var frameRate: Double = 29.97
 
     @Flag(name: .long,
-          help: "Print planned clip list without writing the FCPXML file.")
+          help: "Print planned clip list without writing the NLE export file.")
     var dryRun: Bool = false
 
     // MARK: - Run
@@ -173,13 +177,13 @@ struct SearchCommand: AsyncParsableCommand {
         guard let format = exportNle else {
             emitError(code: .parseError,
                       message: "--export-nle-out requires --export-nle <format>.",
-                      agentAction: "Add --export-nle fcpx to your command.")
+                      agentAction: "Add --export-nle with a format: fcpx, premiere, or resolve.")
             throw ExitCode(VvxExitCode.userError)
         }
         guard let outPath = exportNleOut else {
             emitError(code: .parseError,
                       message: "--export-nle requires --export-nle-out <path>.",
-                      agentAction: "Add --export-nle-out ~/Desktop/output.fcpxml to your command.")
+                      agentAction: "Add --export-nle-out with the output path (e.g. ~/Desktop/cuts.fcpxml, ~/Desktop/cuts.xml, ~/Desktop/cuts.edl).")
             throw ExitCode(VvxExitCode.userError)
         }
         if rag {
@@ -345,16 +349,24 @@ struct SearchCommand: AsyncParsableCommand {
             clips:     nleClips
         )
 
-        // 12 — Write FCPXML
-        let xmlData: Data
+        // 12 — Write NLE export file
+        let nleData: Data
+        let formatLabel: String
         do {
             switch format {
             case .fcpx:
-                xmlData = try FCPXMLWriter.write(timeline)
+                nleData = try FCPXMLWriter.write(timeline)
+                formatLabel = "FCPXML"
+            case .premiere:
+                nleData = try PremiereXMLWriter.write(timeline)
+                formatLabel = "Premiere XML"
+            case .resolve:
+                nleData = try ResolveEDLWriter.write(timeline)
+                formatLabel = "EDL"
             }
         } catch {
             emitError(code: .nleWriteFailed,
-                      message: "FCPXML generation failed: \(error.localizedDescription)")
+                      message: "\(format.rawValue.capitalized) generation failed: \(error.localizedDescription)")
             throw ExitCode(VvxExitCode.forErrorCode(.nleWriteFailed))
         }
 
@@ -364,10 +376,10 @@ struct SearchCommand: AsyncParsableCommand {
             try FileManager.default.createDirectory(atPath: outDir,
                                                      withIntermediateDirectories: true,
                                                      attributes: nil)
-            try xmlData.write(to: URL(fileURLWithPath: resolvedOut))
+            try nleData.write(to: URL(fileURLWithPath: resolvedOut))
         } catch {
             emitError(code: .nleWriteFailed,
-                      message: "Could not write FCPXML to \(resolvedOut): \(error.localizedDescription)")
+                      message: "Could not write \(formatLabel) file to \(resolvedOut): \(error.localizedDescription)")
             throw ExitCode(VvxExitCode.forErrorCode(.nleWriteFailed))
         }
 
@@ -394,7 +406,7 @@ struct SearchCommand: AsyncParsableCommand {
 
         let displayOut = resolvedOut.replacingOccurrences(of: NSHomeDirectory(), with: "~")
         let skipNote   = skipCount > 0 ? " (\(skipCount) skipped)" : ""
-        fputs("FCPXML: wrote \(nleClips.count) clip(s) → \(displayOut)\(skipNote).\n", stderr)
+        fputs("\(formatLabel): wrote \(nleClips.count) clip(s) → \(displayOut)\(skipNote).\n", stderr)
     }
 
     // MARK: - Helpers
