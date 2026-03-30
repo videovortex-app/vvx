@@ -7,8 +7,9 @@ import Foundation
 /// `ExpressibleByArgument` conformance is added in the `vvx` CLI target via extension
 /// to avoid pulling ArgumentParser into VideoVortexCore.
 public enum NleExportFormat: String, CaseIterable, Sendable {
-    case fcpx   // FCPXML 1.9 — Final Cut Pro 10.4.1+
-    // Step 7: case premiere, case resolve
+    case fcpx     // FCPXML 1.9 — Final Cut Pro 10.4.1+
+    case premiere // XMEML v4 — Adobe Premiere Pro
+    case resolve  // CMX 3600 EDL — DaVinci Resolve
 }
 
 // MARK: - NLETimeline
@@ -24,8 +25,9 @@ public struct NLETimeline: Sendable {
 
     public let generatedAt: Date
 
-    /// Frame rate for the FCPXML sequence format ruler (default 29.97).
-    /// Affects only the timeline ruler in FCP — clip trim accuracy is not dependent on this.
+    /// Display timebase for all NLE writers: FCPXML sequence ruler, Premiere sequence,
+    /// and EDL SMPTE timecode frame math (default 29.97).
+    /// Affects the display timebase only — clip trim accuracy is not dependent on this.
     public let frameRate: Double
 
     public let clips: [NLEClip]
