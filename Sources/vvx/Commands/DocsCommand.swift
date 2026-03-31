@@ -146,6 +146,10 @@ private extension DocsCommand {
         vvx sense <url> --metadata-only         # metadata + token budget; no transcript blocks
         vvx sense <url> --start HH:MM:SS --end HH:MM:SS  # time-range slice
         vvx sense <url> --browser safari        # access private/age-restricted content
+        vvx sense <url> --transcript-dir ~/Desktop/srts   # override transcript output location
+        vvx sense <url> --timeout 120                    # yt-dlp/network timeout in seconds
+        vvx sense <url> --skip-download                  # transcript + metadata only, never media
+        vvx sense <url> --all-subs                       # download all available subtitle tracks
         vvx sense <url> --no-sponsors           # strip SponsorBlock segments (requires ffmpeg)
         vvx <url>                               # shorthand (sense is the default)
         ```
@@ -241,6 +245,8 @@ private extension DocsCommand {
         vvx fetch <url> --format audio        # MP3 extract only
         vvx fetch <url> --format broll        # video-only, no audio track
         vvx fetch <url> --browser safari      # access private/age-restricted content
+        vvx fetch <url> --output-dir ~/Desktop/downloads  # override output directory
+        vvx fetch <url> --all-subs             # download all available subtitle tracks
         vvx fetch <url> --no-sponsors         # strip SponsorBlock segments (requires ffmpeg)
         vvx fetch <url> --json                # print VideoMetadata JSON to stdout on completion
         vvx fetch --batch urls.txt            # batch file (one URL per line), NDJSON output
@@ -301,6 +307,7 @@ private extension DocsCommand {
         vvx search "query" --platform YouTube           # filter by platform
         vvx search "query" --after 2026-01-01           # filter by upload date
         vvx search "query" --uploader "Channel Name"    # filter by uploader
+        vvx search "query" --frame-rate 29.97           # set NLE export timeline fps
         ```
 
         ### JSON output schema (`vvx search "query"`)
@@ -623,6 +630,12 @@ private extension DocsCommand {
         vvx gather "query" --max-total-duration 600        # hard cap on total clip minutes
         vvx gather "query" --pad 0                         # tight cuts, no handles
         vvx gather "query" -o ~/Desktop/my-clips           # custom output directory
+        vvx gather "query" --output ~/Desktop/my-clips     # long-form output path flag
+        vvx gather "query" --open                          # reveal output folder when done
+        vvx gather "query" --thumbnails                    # write thumbnails for each clip
+        vvx gather "query" --embed-source                  # burn source metadata into outputs
+        vvx gather "query" --min-likes 10000               # engagement floor
+        vvx gather "query" --min-comments 500              # engagement floor
         ```
 
         ### Chapter-first gather (`--chapters-only`)
@@ -721,6 +734,8 @@ private extension DocsCommand {
         vvx sync <url> --limit 20 --match-title "AI"    # only process titles containing pattern
         vvx sync <url> --limit 20 --after-date 2026-01-01   # only videos uploaded after date
         vvx sync <url> --limit 20 --metadata-only       # no transcript blocks; planning data only
+        vvx sync <url> --limit 20 --all-subs            # download all available subtitle tracks
+        vvx sync <url> --limit 20 --flat-playlist       # treat playlist entries as a flat list
         ```
 
         ### Output (NDJSON — one object per line)
@@ -760,6 +775,11 @@ private extension DocsCommand {
         ```
         vvx clip <videoPath> --start HH:MM:SS --end HH:MM:SS
         vvx clip <videoPath> --start HH:MM:SS --end HH:MM:SS --fast   # keyframe seek (less precise)
+        vvx clip <videoPath> --start HH:MM:SS --duration 15            # start + duration instead of end
+        vvx clip <videoPath> --start HH:MM:SS --end HH:MM:SS --output ~/Desktop/clip.mp4
+        vvx clip <videoPath> --start HH:MM:SS --end HH:MM:SS --open
+        vvx clip <videoPath> --start HH:MM:SS --end HH:MM:SS --thumbnails
+        vvx clip <videoPath> --start HH:MM:SS --end HH:MM:SS --embed-source
         ```
 
         Time format: `HH:MM:SS`, `MM:SS`, or decimal seconds (e.g. `872.5`).
@@ -861,6 +881,8 @@ private extension DocsCommand {
         vvx library --platform YouTube           # filter by platform
         vvx library --uploader "Channel Name"    # filter by uploader
         vvx library --downloaded                 # only videos with a local video file
+        vvx library --sort uploadDate            # explicit sort field
+        vvx library --paths-only                 # emit paths only for shell piping
         ```
 
         ### Output schema (NDJSON — one object per line)
@@ -984,6 +1006,7 @@ private extension DocsCommand {
         ```
         vvx reindex
         vvx reindex --dry-run    # show what would be indexed without writing
+        vvx reindex --no-write-info-json   # skip backfilling .info.json sidecars
         ```
 
         ### Behavior

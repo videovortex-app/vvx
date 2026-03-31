@@ -39,6 +39,7 @@ struct Vvx: AsyncParsableCommand {
             IngestCommand.self,
             SqlCommand.self,
             EngineCommand.self,
+            SkillsCommand.self,
             DoctorCommand.self,
             DocsCommand.self,
         ],
