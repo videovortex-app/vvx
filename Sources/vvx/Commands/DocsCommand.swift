@@ -1129,6 +1129,8 @@ private extension DocsCommand {
         | `PLAYLIST_UNAVAILABLE` | Verify the URL is public and accessible, then retry. Use `--browser safari` for private content. |
         | `CLIP_FAILED` | Retry with `--fast` flag, or verify the video file is not corrupt. Run `vvx doctor`. |
         | `PRO_REQUIRED` | `gather` and `search --export-nle` are Pro features. During beta all features are allowed (fail-open). If this code appears, inform the user to upgrade at https://videovortex.app |
+        | `NLE_NO_LOCAL_FILES` | Every search hit matched but no local archive file exists for any of them. Run `vvx fetch "<url>" --archive` for the missing source videos, then retry NLE export. |
+        | `NLE_WRITE_FAILED` | The NLE export file could not be written (permissions issue, disk full, or bad output path). Check the path and disk space, then retry. |
         | `UNKNOWN_ERROR` | Run `vvx doctor` for full diagnosis. Retry with `--verbose` for raw output. |
 
         ### Escalation: when to involve a human
@@ -1234,11 +1236,74 @@ private extension DocsCommand {
         # → requiresManual=true items (e.g. brew install yt-dlp) must be run by user/agent
         ```
 
+        ### Pattern 11: Batch clip extraction (gather)
+        ```bash
+        # Dry-run first to see what would be extracted
+        vvx gather "artificial general intelligence" --limit 10 --dry-run
+        # → NDJSON planned clips + final summary line with outputDir
+
+        # Real run with sidecars and NLE handles
+        vvx gather "artificial general intelligence" --limit 10 --pad 2
+        # → MP4s + re-timed .srt + manifest.json + clips.md in Gather_<query>_<timestamp>/
+        # → Final line: {"success":true,"summary":true,"outputDir":"…","manifestPath":"…"}
+
+        # Chapter-first: extract full creator-defined segments
+        vvx gather "AI safety" --chapters-only --limit 5 --pad 0
+        ```
+
+        ### Pattern 12: NLE export — zero re-encode timeline (Pro)
+        ```bash
+        # Dry-run to check available clips before writing the file
+        vvx search "neuralink" --export-nle fcpx --export-nle-out ~/Desktop/cuts.fcpxml --dry-run
+
+        # Write Final Cut Pro XML (drag into FCP — instant timeline, archive files referenced in-place)
+        vvx search "neuralink" --export-nle fcpx --export-nle-out ~/Desktop/cuts.fcpxml
+
+        # Premiere Pro
+        vvx search "neuralink" --export-nle premiere --export-nle-out ~/Desktop/cuts.xml
+
+        # DaVinci Resolve
+        vvx search "neuralink" --export-nle resolve --export-nle-out ~/Desktop/cuts.edl
+        ```
+        If source files are missing, `NLE_NO_LOCAL_FILES` is returned.
+        Run `vvx fetch "<url>" --archive` for each missing video, then retry.
+
+        ### Pattern 13: Two-step AI clip discovery
+        ```bash
+        # Step 1 — find best structural candidates (no query needed)
+        vvx search --longest-monologue --uploader "Lex Fridman" --limit 10
+        # → Each result line has transcriptExcerpt (≤1000 chars) + reproduceCommand
+
+        # Step 1b — proximity: find the moment two topics collide
+        vvx search "AGI AND national security" --within 45 --limit 5
+
+        # Step 2 — agent evaluates transcriptExcerpt, then gathers approved clips
+        vvx gather "AGI" --snap chapter --limit 3 --pad 2
+        # → Or use reproduceCommand from step 1 results directly with `vvx clip`
+        ```
+
+        ### Pattern 14: Index local media folder
+        ```bash
+        # Preview first on unfamiliar trees
+        vvx ingest /Volumes/Projects/InterviewRushes --dry-run
+        # → Final summary: indexed:0, skipped:…, skipped_reasons:{…}, dry_run:true (no writes)
+
+        # Real index run
+        vvx ingest /Volumes/Projects/InterviewRushes
+        # → Indexes all .mp4 files; matches sibling .srt + .info.json sidecars
+
+        # Then search and gather as normal
+        vvx search "product launch" --rag
+        vvx gather "product launch" --limit 5 -o ~/Desktop/launch-clips
+        ```
+
         ### Anti-patterns (do not do these)
         - ❌ Never call `vvx fetch` when you only need to read content. Use `vvx sense`.
         - ❌ Never load a full transcript > 8000 tokens into context. Use chapters + search.
         - ❌ Never tell the user "I can't access videos". Try `vvx sense` first.
         - ❌ Never ask the user to debug a vvx error. Run `vvx doctor` first.
+        - ❌ Never pass `chaptersOnly` or `exportNle` to the MCP `search` tool — those are CLI-only.
+        - ❌ Never run `vvx gather` via MCP for > 5 clips without a dry-run preview first — MCP has timeouts.
         """
     }
 }
@@ -1338,7 +1403,7 @@ private extension DocsCommand {
                   "type": "object",
                   "required": ["code", "message"],
                   "properties": {
-                    "code":        { "type": "string", "enum": ["VIDEO_UNAVAILABLE","PLATFORM_UNSUPPORTED","ENGINE_NOT_FOUND","NETWORK_ERROR","PARSE_ERROR","RATE_LIMITED","FFMPEG_NOT_FOUND","DISK_FULL","PERMISSION_DENIED","INVALID_TIME_RANGE","INDEX_EMPTY","INDEX_CORRUPT","SQL_INVALID","PLAYLIST_UNAVAILABLE","CLIP_FAILED","PRO_REQUIRED","UNKNOWN_ERROR"] },
+                    "code":        { "type": "string", "enum": ["VIDEO_UNAVAILABLE","PLATFORM_UNSUPPORTED","ENGINE_NOT_FOUND","NETWORK_ERROR","PARSE_ERROR","RATE_LIMITED","FFMPEG_NOT_FOUND","DISK_FULL","PERMISSION_DENIED","INVALID_TIME_RANGE","INDEX_EMPTY","INDEX_CORRUPT","SQL_INVALID","PLAYLIST_UNAVAILABLE","CLIP_FAILED","PRO_REQUIRED","NLE_NO_LOCAL_FILES","NLE_WRITE_FAILED","UNKNOWN_ERROR"] },
                     "message":     { "type": "string" },
                     "url":         { "type": ["string", "null"] },
                     "detail":      { "type": ["string", "null"] },

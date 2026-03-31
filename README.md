@@ -312,6 +312,17 @@ Until billing is live, all features are accessible (beta/fail-open policy). Run 
 
 ---
 
+## 🔗 Stable API surface for tooling and GUI consumers
+
+Phase 3.5 ships the following stable contracts that downstream tooling (local GUI, scripts, agents) may rely on:
+
+- **`manifest.json` `schemaVersion: 2`** — written by every `vvx gather` run. Fields: `query`, `outputDir`, `encodeMode`, `padSeconds`, `clips[]` (each with `outputPath`, `srtPath`, `logicalStartSeconds`, `logicalEndSeconds`, `paddedStartSeconds`, `paddedEndSeconds`, `reproduceCommand`, `encodeMode`, `transcriptSource`, engagement snapshot, chapter info). `schemaVersion` will increment on breaking field changes.
+- **`GatherSummaryLine` (final stdout NDJSON line)** — `outputDir` + `manifestPath` are the handoff artifacts. Tools should read `manifestPath` from the last line rather than reconstructing the path.
+- **`vvx search` NDJSON** — `videoPath`, `startSeconds`, `endSeconds`, `reproduceCommand` are stable for chaining into `clip` or `gather`.
+- **`vvx ingest` summary** — `skipped_reasons` keys (`non_video`, `invalid_sidecar`, `corrupt_media`, `already_indexed`) and `malformed_info_json_count` are always present and stable.
+
+---
+
 ## ⚖️ License
 
 Distributed under the Apache 2.0 License. See [LICENSE](LICENSE) for more information.

@@ -255,6 +255,8 @@ All `skipped_reasons` keys are always present (value `0` when none). Stderr emit
 | `INDEX_CORRUPT` | Run `rm ~/.vvx/vortex.db && vvx reindex` |
 | `CLIP_FAILED` | Retry with `--fast`; verify file is not corrupt; run `vvx doctor` |
 | `PRO_REQUIRED` | `gather` and `search --export-nle` are Pro features. During beta all features are allowed (fail-open). If this error appears, inform the user to upgrade at https://videovortex.app |
+| `NLE_NO_LOCAL_FILES` | Every search hit matched but no local archive file exists for any of them. Run `vvx fetch "<url>" --archive` for the missing videos, then retry the NLE export. |
+| `NLE_WRITE_FAILED` | The NLE export file could not be written (permissions, disk full, bad output path). Check the path and disk space, then retry. |
 | Any other error | Run `vvx doctor` |
 
 ---
