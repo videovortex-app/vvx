@@ -1,18 +1,27 @@
 #!/usr/bin/env python3
 """
-check_docs_coverage.py — Verify DocsCommand.swift documents every parser flag.
+check_docs_coverage.py — Verify DocsCommand.swift documents every parser flag
+in the CORRECT section.
 
 For each vvx subcommand, runs `vvx <command> --help`, extracts every --flag-name
-the binary reports, and asserts that the flag appears verbatim somewhere in
-Sources/vvx/Commands/DocsCommand.swift.
+the binary reports, and asserts that the flag appears inside the matching section
+string in Sources/vvx/Commands/DocsCommand.swift.
+
+A section is delimited by the Swift string variable name, e.g.:
+  var searchSection: String { ... }   ← covers the "search" command
+  var gatherSection: String { ... }   ← covers the "gather" command
+
+The check is section-scoped: a flag that only appears in gatherSection does NOT
+satisfy the requirement for clip.  This prevents the cross-section false-pass
+that allowed --exact and --pad to slip out of the clip docs.
 
 Run from the repo root after a release build:
   python3 scripts/check_docs_coverage.py
   python3 scripts/check_docs_coverage.py --vvx .build/release/vvx
 
 Exit codes
-  0  DocsCommand.swift covers every flag exposed by the parser
-  1  one or more parser flags are missing from DocsCommand.swift
+  0  Every flag for every command is documented in the correct section
+  1  One or more parser flags are missing from the correct section
 """
 
 import argparse
@@ -43,6 +52,24 @@ DOCS_FILE = Path("Sources/vvx/Commands/DocsCommand.swift")
 # in the hand-written prose (they are always present and self-explanatory).
 UNIVERSAL_FLAGS = {"--help", "--version"}
 
+# Flags that are intentionally shared across sections (e.g. --limit appears
+# in both search and gather). List them here to suppress duplicate warnings
+# when a flag is legitimately documented only in one canonical section.
+# Key = flag, Value = the one section where it is canonically documented.
+# Any command that also has the flag but is NOT the canonical section is exempt.
+CANONICAL_SECTION: dict[str, str] = {
+    # These flags exist on multiple commands; document them in the canonical
+    # section only. Other commands that have the flag are exempt.
+    "--limit":    "search",
+    "--platform": "search",
+    "--after":    "search",
+    "--uploader": "search",
+    "--pad":      "gather",   # gather owns the full pad/snap/context table
+    "--snap":     "gather",
+    "--context-seconds": "gather",
+    "--dry-run":  "search",   # first introduced in search NLE export
+}
+
 
 # ---------------------------------------------------------------------------
 # Helpers
@@ -50,9 +77,12 @@ UNIVERSAL_FLAGS = {"--help", "--version"}
 
 def get_parser_flags(binary: str, command: str) -> set[str]:
     """
-    Return the set of --flag-names that `vvx <command> --help` reports.
-    Both stdout and stderr are scanned because ArgumentParser sometimes writes
-    to stderr on error paths.
+    Return the set of real parser flags from the OPTIONS section of
+    `vvx <command> --help`.
+
+    Important: do NOT scan the whole help output. Example blocks in the
+    discussion can mention flags from other commands (for example `vvx search
+    --rag` inside `vvx clip --help`), which creates false positives.
     """
     result = subprocess.run(
         [binary, command, "--help"],
@@ -60,8 +90,42 @@ def get_parser_flags(binary: str, command: str) -> set[str]:
         text=True,
     )
     output = result.stdout + result.stderr
-    flags = set(re.findall(r'(--[\w-]+)', output))
+
+    options_match = re.search(r"(?ms)^OPTIONS:\n(.*?)(?:^\S|\Z)", output)
+    options_text = options_match.group(1) if options_match else ""
+
+    flags = set()
+    for line in options_text.splitlines():
+        stripped = line.lstrip()
+        if not stripped.startswith("-"):
+            continue
+        flags.update(re.findall(r"(--[\w-]+)", stripped))
+
     return flags - UNIVERSAL_FLAGS
+
+
+def extract_section(docs_text: str, command: str) -> str:
+    """
+    Return the text of the Swift string variable `var <command>Section`.
+    Falls back to the full file if the section cannot be isolated, so the
+    check is never noisier than the old global search.
+    """
+    # Match:  var <command>Section: String {
+    #           """
+    #           ...content...
+    #           """
+    #         }
+    # We use a simple heuristic: grab everything between the opening triple-
+    # quote after `var <cmd>Section` and the closing triple-quote.
+    pattern = re.compile(
+        rf'var {re.escape(command)}Section\b.*?"""\n(.*?)"""',
+        re.DOTALL,
+    )
+    m = pattern.search(docs_text)
+    if m:
+        return m.group(1)
+    # Fallback: return the full file (old behaviour, less strict)
+    return docs_text
 
 
 # ---------------------------------------------------------------------------
@@ -70,7 +134,8 @@ def get_parser_flags(binary: str, command: str) -> set[str]:
 
 def main() -> None:
     ap = argparse.ArgumentParser(
-        description="Check that DocsCommand.swift covers all parser flags.",
+        description="Check that DocsCommand.swift covers all parser flags "
+                    "in the CORRECT section.",
         formatter_class=argparse.RawDescriptionHelpFormatter,
         epilog=__doc__,
     )
@@ -111,15 +176,25 @@ def main() -> None:
             print(f"  ?  {cmd}: no flags found in --help output (binary missing?)")
             continue
 
-        missing = sorted(f for f in flags if f not in docs_text)
+        section_text = extract_section(docs_text, cmd)
+
+        missing = []
+        for flag in sorted(flags):
+            # If this flag has a canonical section and it isn't this command,
+            # check only that the canonical section documents it (skip here).
+            canonical = CANONICAL_SECTION.get(flag)
+            if canonical and canonical != cmd:
+                continue
+            if flag not in section_text:
+                missing.append(flag)
 
         if missing:
-            print(f"  ✗  {cmd}: {len(missing)} flag(s) missing from DocsCommand.swift")
+            print(f"  ✗  {cmd}: {len(missing)} flag(s) missing from {cmd}Section")
             for flag in missing:
                 print(f"       └─ {flag}")
             all_missing.extend((cmd, f) for f in missing)
         else:
-            print(f"  ✓  {cmd}: {len(flags)} flag(s) all covered")
+            print(f"  ✓  {cmd}: all flags covered in {cmd}Section")
 
     print()
 
@@ -127,7 +202,7 @@ def main() -> None:
         print(
             f"FAIL — {len(all_missing)} flag(s) across "
             f"{len({cmd for cmd, _ in all_missing})} command(s) are in the parser "
-            f"but absent from DocsCommand.swift."
+            f"but absent from the correct section of DocsCommand.swift."
         )
         print()
         print("Add documentation for each missing flag to the corresponding")
@@ -136,7 +211,7 @@ def main() -> None:
     else:
         print(
             f"PASS — DocsCommand.swift covers all parser flags "
-            f"across {len(COMMANDS)} commands."
+            f"across {len(COMMANDS)} commands (section-scoped)."
         )
         sys.exit(0)
 

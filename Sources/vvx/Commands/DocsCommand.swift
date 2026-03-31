@@ -148,9 +148,9 @@ private extension DocsCommand {
         vvx sense <url> --browser safari        # access private/age-restricted content
         vvx sense <url> --transcript-dir ~/Desktop/srts   # override transcript output location
         vvx sense <url> --timeout 120                    # yt-dlp/network timeout in seconds
-        vvx sense <url> --skip-download                  # transcript + metadata only, never media
         vvx sense <url> --all-subs                       # download all available subtitle tracks
-        vvx sense <url> --no-sponsors           # strip SponsorBlock segments (requires ffmpeg)
+        vvx sense <url> --no-auto-update                 # deprecated no-op; retained for compatibility
+        vvx sense <url> --no-sponsors                    # strip SponsorBlock segments (requires ffmpeg)
         vvx <url>                               # shorthand (sense is the default)
         ```
 
@@ -244,11 +244,15 @@ private extension DocsCommand {
         vvx fetch <url> --archive             # full project folder: MP4 + SRT + .info.json + thumbnail
         vvx fetch <url> --format audio        # MP3 extract only
         vvx fetch <url> --format broll        # video-only, no audio track
+        vvx fetch <url> --format 1080         # cap resolution at 1080p
+        vvx fetch <url> --format 720          # cap resolution at 720p
         vvx fetch <url> --browser safari      # access private/age-restricted content
         vvx fetch <url> --output-dir ~/Desktop/downloads  # override output directory
         vvx fetch <url> --all-subs             # download all available subtitle tracks
+        vvx fetch <url> --no-auto-update       # deprecated no-op; retained for compatibility
         vvx fetch <url> --no-sponsors         # strip SponsorBlock segments (requires ffmpeg)
         vvx fetch <url> --json                # print VideoMetadata JSON to stdout on completion
+        vvx fetch url1 url2 url3              # multiple URLs, NDJSON output
         vvx fetch --batch urls.txt            # batch file (one URL per line), NDJSON output
         cat urls.txt | vvx fetch              # stdin pipe, NDJSON output
         ```
@@ -257,8 +261,11 @@ private extension DocsCommand {
         | Flag value | Result |
         |------------|--------|
         | `best` (default) | Best available quality MP4 |
+        | `1080` / `1080p` | Cap at 1080p |
+        | `720` / `720p` | Cap at 720p |
         | `broll` | Video-only stream (no audio), for B-roll use |
-        | `audio` | MP3 audio extract |
+        | `audio` / `mp3` | MP3 audio extract |
+        | `reactionkit` | Side-by-side reaction layout (archive mode implied) |
 
         ### Output schema (JSON with --json flag)
         ```json
@@ -295,11 +302,17 @@ private extension DocsCommand {
         surrounding context. Requires at least one video to be indexed first (via `sense`,
         `fetch`, or `sync`).
 
+        Supports FTS5 query syntax: boolean operators (`AND`, `OR`, `NOT`), phrase search
+        (`"exact phrase"`), and prefix search (`intell*`). Porter stemming is active by
+        default — `"run"` matches `"running"`, `"AGI"` matches `"AGIs"`.
+
         ### Usage — keyword search
         ```
         vvx search "query"
         vvx search "query" --rag                        # structured Markdown for direct answer
-        vvx search "AI AND safety"                      # boolean AND
+        vvx search "AI AND safety"                      # boolean AND — both terms must appear
+        vvx search "AGI OR robotics"                    # boolean OR — either term matches
+        vvx search "AI NOT politics"                    # boolean NOT — exclude term
         vvx search "\\"exact phrase\\""                 # phrase search
         vvx search "intell*"                            # prefix search
         vvx search "query" --max-tokens 5000            # token-budget cap for --rag output
@@ -735,7 +748,8 @@ private extension DocsCommand {
         vvx sync <url> --limit 20 --after-date 2026-01-01   # only videos uploaded after date
         vvx sync <url> --limit 20 --metadata-only       # no transcript blocks; planning data only
         vvx sync <url> --limit 20 --all-subs            # download all available subtitle tracks
-        vvx sync <url> --limit 20 --flat-playlist       # treat playlist entries as a flat list
+        vvx sync <url> --limit 20 --no-auto-update      # deprecated no-op; retained for compatibility
+        vvx sync <url> --limit 20 --force               # re-sync videos even if already indexed
         ```
 
         ### Output (NDJSON — one object per line)
@@ -774,28 +788,39 @@ private extension DocsCommand {
         ### Usage
         ```
         vvx clip <videoPath> --start HH:MM:SS --end HH:MM:SS
-        vvx clip <videoPath> --start HH:MM:SS --end HH:MM:SS --fast   # keyframe seek (less precise)
+        vvx clip <videoPath> --start HH:MM:SS --end HH:MM:SS --fast    # keyframe seek (±2-5s drift, instant)
+        vvx clip <videoPath> --start HH:MM:SS --end HH:MM:SS --exact   # re-encode (libx264 CRF 18, frame-accurate)
         vvx clip <videoPath> --start HH:MM:SS --duration 15            # start + duration instead of end
+        vvx clip <videoPath> --start HH:MM:SS --end HH:MM:SS --pad 0   # no NLE handles (default: 2.0s)
         vvx clip <videoPath> --start HH:MM:SS --end HH:MM:SS --output ~/Desktop/clip.mp4
         vvx clip <videoPath> --start HH:MM:SS --end HH:MM:SS --open
         vvx clip <videoPath> --start HH:MM:SS --end HH:MM:SS --thumbnails
         vvx clip <videoPath> --start HH:MM:SS --end HH:MM:SS --embed-source
         ```
 
-        Time format: `HH:MM:SS`, `MM:SS`, or decimal seconds (e.g. `872.5`).
+        Time format: `HH:MM:SS`, `MM:SS`, decimal seconds (e.g. `872.5`), or compact (`1m30s`, `2h1m30s`).
 
         ### Output schema (JSON to stdout)
         ```json
         {
           "success": true,
-          "outputPath": "/absolute/path/to/clip_872s_887s.mp4",
-          "startSeconds": 872.0,
-          "endSeconds": 887.0,
+          "inputPath": "/absolute/path/to/source.mp4",
+          "outputPath": "/absolute/path/to/clip_14m32s_to_14m47s.mp4",
+          "startTime": "00:14:32",
+          "endTime": "00:14:47",
+          "durationSeconds": 15.0,
+          "padSeconds": 2.0,
           "method": "frame_accurate",
+          "encodeMode": "default",
+          "embedSourceApplied": false,
+          "sizeBytes": 4194304,
+          "thumbnailPath": null,
           "completedAt": "2026-03-24T10:30:00Z"
         }
         ```
-        `method` is `"frame_accurate"` (default) or `"fast_copy"` (with `--fast`).
+        `method` is `"frame_accurate"` (default), `"fast_copy"` (with `--fast`), or `"exact"` (with `--exact`).
+        `encodeMode` is `"default"`, `"copy"` (with `--fast`), or `"exact"` (with `--exact`).
+        `thumbnailPath` is populated when `--thumbnails` is passed. `--fast` and `--exact` are mutually exclusive.
 
         ### Agent rules for clip
         - `FFMPEG_NOT_FOUND`: run `vvx doctor --auto-fix` to install ffmpeg, then retry.
@@ -882,10 +907,14 @@ private extension DocsCommand {
         vvx library --uploader "Channel Name"    # filter by uploader
         vvx library --downloaded                 # only videos with a local video file
         vvx library --sort uploadDate            # explicit sort field
-        vvx library --paths-only                 # emit paths only for shell piping
+        vvx library --paths-only                 # emit paths only for shell piping (implies --downloaded)
+        vvx library --json                       # NDJSON to stdout instead of human table
         ```
 
-        ### Output schema (NDJSON — one object per line)
+        Default output is a human-readable table on **stderr**. Use `--json` for machine-readable NDJSON
+        on stdout (safe to pipe). `--paths-only` outputs one video path per line on stdout.
+
+        ### Output schema (`--json` NDJSON — one object per line)
         ```json
         {
           "id": "https://youtube.com/watch?v=...",
@@ -898,12 +927,9 @@ private extension DocsCommand {
           "videoPath": "/absolute/path/... | null",
           "sensedAt": "2026-03-24T10:30:00Z",
           "archivedAt": "2026-03-24T10:31:00Z | null",
-          "tags": ["tag1"],
           "viewCount": 1482930,
           "likeCount": 48320,
-          "commentCount": 3210,
-          "description": "...",
-          "chapters": [...]
+          "commentCount": 3210
         }
         ```
 
@@ -927,7 +953,8 @@ private extension DocsCommand {
         ### Usage
         ```
         vvx sql "SELECT ..."
-        vvx sql --schema                # print table and column definitions
+        vvx sql --schema                # print CREATE TABLE definitions for all tables
+        vvx sql "SELECT ..." --markdown # output results as a Markdown table (useful in --rag pipelines)
         ```
 
         ### `videos` table columns
@@ -1005,8 +1032,8 @@ private extension DocsCommand {
         ### Usage
         ```
         vvx reindex
-        vvx reindex --dry-run    # show what would be indexed without writing
-        vvx reindex --no-write-info-json   # skip backfilling .info.json sidecars
+        vvx reindex --dry-run    # preview without writing
+        vvx reindex --force      # re-import videos already indexed (refreshes metadata from .info.json)
         ```
 
         ### Behavior
