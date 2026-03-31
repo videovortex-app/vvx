@@ -1,4 +1,7 @@
 import Foundation
+#if canImport(FoundationNetworking)
+import FoundationNetworking
+#endif
 
 // MARK: - Catalog model
 
@@ -136,7 +139,7 @@ struct SkillsManager {
         let catalog   = try JSONDecoder().decode(SkillsCatalog.self, from: data)
         let dir       = catalogCacheURL.deletingLastPathComponent()
         try FileManager.default.createDirectory(at: dir, withIntermediateDirectories: true)
-        try data.write(to: catalogCacheURL, options: .atomic)
+        try data.write(to: catalogCacheURL, options: Data.WritingOptions.atomic)
         return catalog
     }
 
