@@ -289,6 +289,7 @@ Once configured, the agent discovers all tools automatically.
 - **`gather`** — Returns all NDJSON lines as one block. The final line is `GatherSummaryLine`; read `manifestPath` from it. For large gather jobs prefer running `vvx gather` in Terminal.
 - **`ingest`** — Supports optional `dryRun: true` (bool) and `forceReindex: true` (bool). Prefer `dryRun: true` on unknown trees before writing to vortex.db. Returns all NDJSON including final summary line as one block.
 - **`search` structural/proximity** — Pass `longestMonologue: true`, `highDensity: true`, or `within: <seconds>` (with an explicit-AND query) instead of `outputFormat`.
+- **`search` CLI-only features** — `--chapters-only` and `--export-nle` are not available via MCP. For chapter search or NLE export, have the user run `vvx search …` in Terminal.
 
 ---
 
