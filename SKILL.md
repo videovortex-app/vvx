@@ -1,9 +1,9 @@
 # VideoVortex (vvx) — Agent Skill
 
-**Version:** 0.3.0  
-**Install:** `brew install videovortex-app/tap/vvx`  
-**MCP:** Add `vvx-mcp` to `claude_desktop_config.json` (see Setup section)  
-**What it does:** Turns any video URL into structured JSON + full transcripts, and provides sub-second search and NLE timeline assembly across your local media archive.
+**Version:** 0.4.0
+**Install:** `brew install videovortex-app/tap/vvx`
+**MCP:** Add `vvx-mcp` to `claude_desktop_config.json` (see Setup section)
+**What it does:** Turns any video URL into structured JSON + full transcripts, provides sub-second search and NLE timeline assembly across your local media archive, and indexes local media folders without moving files.
 
 ---
 
@@ -54,6 +54,10 @@ Use `vvx` when the user asks you to:
 - Search across a local video archive.
 - Sync a channel or playlist into the local database.
 - Batch-extract searched clips and assemble them for video editors (`gather`).
+- Export a search result directly to Final Cut Pro, Premiere Pro, or DaVinci Resolve (`search --export-nle`).
+- Find the longest unbroken speech spans or highest-density windows across the archive.
+- Find the exact moment two topics collide in time (`search --within`).
+- Index a local folder of media files without moving or copying them (`ingest`).
 
 Do NOT use `vvx` for:
 
@@ -71,8 +75,19 @@ Do NOT use `vvx` for:
 | Fetch one video into library-style workflows | `vvx fetch <url>` |
 | Fetch audio-only output | `vvx fetch <url> --format audio` |
 | Sync channel/playlist into local archive | `vvx sync <url> --limit N [--incremental] [--archive]` |
-| Search across indexed transcripts | `vvx search "query"` |
-| Batch-extract search hits as raw video clips (Pro) | `vvx gather "query" --limit N [-o dir]` |
+| Search across indexed transcripts (agent answer) | `vvx search "query" --rag [--max-tokens N]` |
+| Search for clips to chain into clip command | `vvx search "query"` (JSON output) |
+| Find longest unbroken speech spans | `vvx search --longest-monologue [--uploader X] [--limit N]` |
+| Find highest-density talking windows | `vvx search --high-density [--density-window 30] [--limit N]` |
+| Find tightest moment two topics collide | `vvx search "A AND B" --within <seconds>` |
+| Search chapter titles across archive | `vvx search "topic" --chapters-only` |
+| Export search result to Final Cut Pro **(Pro)** | `vvx search "query" --export-nle fcpx --export-nle-out ~/Desktop/cuts.fcpxml` |
+| Export to Premiere Pro **(Pro)** | `vvx search "query" --export-nle premiere --export-nle-out ~/Desktop/cuts.xml` |
+| Export to DaVinci Resolve **(Pro)** | `vvx search "query" --export-nle resolve --export-nle-out ~/Desktop/cuts.edl` |
+| Batch-extract search hits as raw video clips **(Pro)** | `vvx gather "query" --limit N [-o dir]` |
+| Extract full chapter segments matching a query **(Pro)** | `vvx gather "query" --chapters-only --limit N` |
+| Index a local folder of media files | `vvx ingest <path>` |
+| Preview what ingest would index (no DB writes) | `vvx ingest <path> --dry-run` |
 | Extract a video segment from a local file | `vvx clip <videoPath> --start <time> --end <time>` |
 | Inspect archive inventory (downloaded media) | `vvx library --downloaded` |
 | Run analytics safely against local DB | `vvx sql "SELECT ..."` *(OS-level read-only connection)* |
@@ -104,6 +119,10 @@ Do NOT use `vvx` for:
 6. **Never tell the user "I can't access videos."** Always try `vvx sense` first.
 
 7. **Human file download only — `vvx dl`.** Use **only** when the user clearly asks to save a video file for personal viewing. `vvx dl <url>` bypasses `vortex.db`, emits no agent JSON, and writes a flat file under `~/Downloads`. For structured data, use `vvx sense` or `vvx fetch`.
+
+8. **For gather and NLE export (`search --export-nle`): both are Pro features.** Under the current beta policy all features are allowed (fail-open). If a `PRO_REQUIRED` error appears, see the error table below.
+
+9. **`vvx doctor` is the first diagnostic tool.** Call it automatically on any unexpected error before escalating.
 
 ---
 
@@ -147,12 +166,86 @@ Do NOT use `vvx` for:
 
 ---
 
+## gather — Key NDJSON fields for agents
+
+Every clip outcome is one stdout line. The **final line** is always a `GatherSummaryLine` — agents should read `manifestPath` from it for downstream use.
+
+**Per-clip success line (key fields):**
+
+```json
+{
+  "success": true,
+  "outputPath": "/abs/path/01_Lex_Fridman_14m32s_snippet.mp4",
+  "videoId": "https://youtube.com/watch?v=...",
+  "startTime": "00:14:32",
+  "endTime": "00:14:47",
+  "durationSeconds": 15.0,
+  "resolvedStartSeconds": 872.0,
+  "resolvedEndSeconds": 887.0,
+  "padSeconds": 2.0,
+  "paddedStartSeconds": 870.0,
+  "paddedEndSeconds": 889.0,
+  "plannedSrtPath": "/abs/path/01_Lex_Fridman_14m32s_snippet.srt",
+  "encodeMode": "copy | default | exact",
+  "snapApplied": "off | block | chapter",
+  "thumbnailPath": "/abs/path/01_Lex_Fridman_14m32s_snippet.jpg | null",
+  "chapterTitle": "The AGI Debate | null",
+  "chapterIndex": 3
+}
+```
+
+**Budget skip line:**
+```json
+{"success":false,"skipped":true,"reason":"budget_exceeded","videoId":"...","plannedDurationSeconds":12.5}
+```
+
+**Final summary line (always last):**
+```json
+{
+  "success": true,
+  "summary": true,
+  "succeeded": 15,
+  "failed": 2,
+  "total": 17,
+  "dryRun": false,
+  "outputDir": "/abs/path/Gather_AGI_20260330_143052/",
+  "manifestPath": "/abs/path/Gather_AGI_20260330_143052/manifest.json"
+}
+```
+
+`manifestPath` is `null` for `--dry-run` runs or when no clips succeeded. Pass it to downstream tools or the editor.
+
+**Exit codes:** `0` = all succeeded (or zero hits, or dry-run). `1` = any clip failed.
+
+---
+
+## ingest — NDJSON summary for agents
+
+```json
+{
+  "type": "summary",
+  "indexed": 47,
+  "skipped": 12,
+  "skipped_reasons": {
+    "non_video": 8,
+    "invalid_sidecar": 0,
+    "corrupt_media": 1,
+    "already_indexed": 3
+  },
+  "malformed_info_json_count": 2
+}
+```
+
+All `skipped_reasons` keys are always present (value `0` when none). Stderr emits heartbeats every ~100 files; prefix `DRY-RUN:` when `--dry-run` is active.
+
+---
+
 ## Error Recovery Patterns
 
 | Error Code | Immediate Action |
 |------------|-----------------|
 | `ENGINE_NOT_FOUND` | Install yt-dlp: `brew install yt-dlp` (macOS) or `pip install yt-dlp`, then retry |
-| `VIDEO_UNAVAILABLE` | Retry with `--browser safari` |
+| `VIDEO_UNAVAILABLE` | Retry with `--browser safari`; or for gather/search: run `vvx fetch "<url>" --archive` to download the source file |
 | `PLATFORM_UNSUPPORTED` | Update yt-dlp: `brew upgrade yt-dlp` or `pip install -U yt-dlp`, then retry |
 | `PARSE_ERROR` | Update yt-dlp: `brew upgrade yt-dlp` or `pip install -U yt-dlp`, then retry |
 | `RATE_LIMITED` | Wait several minutes, then retry |
@@ -161,7 +254,18 @@ Do NOT use `vvx` for:
 | `INDEX_EMPTY` | Run `vvx sync <url> --limit 10` to populate archive, then retry |
 | `INDEX_CORRUPT` | Run `rm ~/.vvx/vortex.db && vvx reindex` |
 | `CLIP_FAILED` | Retry with `--fast`; verify file is not corrupt; run `vvx doctor` |
+| `PRO_REQUIRED` | `gather` and `search --export-nle` are Pro features. During beta all features are allowed (fail-open). If this error appears, inform the user to upgrade at https://videovortex.app |
+| `NLE_NO_LOCAL_FILES` | Every search hit matched but no local archive file exists for any of them. Run `vvx fetch "<url>" --archive` for the missing videos, then retry the NLE export. |
+| `NLE_WRITE_FAILED` | The NLE export file could not be written (permissions, disk full, bad output path). Check the path and disk space, then retry. |
 | Any other error | Run `vvx doctor` |
+
+---
+
+## Environment Variables
+
+| Variable | Effect |
+|----------|--------|
+| `VVX_FORCE_PRO_DENIED=1` | Forces Pro entitlement checks to return denied — simulates a non-Pro user. Useful for testing `PRO_REQUIRED` error paths. |
 
 ---
 
@@ -184,6 +288,10 @@ Once configured, the agent discovers all tools automatically.
 - `tools/call` is a single blocking request/response. Batch tools (`sync`, `library`, `sql`, `reindex`) aggregate NDJSON lines in memory and return them as one text block.
 - **`search.outputFormat`** — Must be `"json"` (structured, for chaining into `clip`) or `"rag"` (Markdown with clip commands, for answering user questions).
 - **`sync.limit`** — Required. Prefer 5–20 videos per call to avoid MCP host timeouts.
+- **`gather`** — Returns all NDJSON lines as one block. The final line is `GatherSummaryLine`; read `manifestPath` from it. For large gather jobs prefer running `vvx gather` in Terminal.
+- **`ingest`** — Supports optional `dryRun: true` (bool) and `forceReindex: true` (bool). Prefer `dryRun: true` on unknown trees before writing to vortex.db. Returns all NDJSON including final summary line as one block.
+- **`search` structural/proximity** — Pass `longestMonologue: true`, `highDensity: true`, or `within: <seconds>` (with an explicit-AND query) instead of `outputFormat`.
+- **`search` CLI-only features** — `--chapters-only` and `--export-nle` are not available via MCP. For chapter search or NLE export, have the user run `vvx search …` in Terminal.
 
 ---
 
@@ -196,11 +304,32 @@ User wants to analyze / summarize / quote from a video
 User wants to find a specific quote or topic across their archive
   → vvx search "query" --rag --max-tokens 5000
 
+User wants the longest unbroken monologue / deepest single rant on a topic
+  → vvx search --longest-monologue --uploader "X" --limit 5
+
+User wants the most rapid-fire dense segment (highlight reel)
+  → vvx search --high-density --density-window 30 --limit 5
+
+User wants the exact moment two topics collide
+  → vvx search "TopicA AND TopicB" --within 60
+
+User wants to find content by chapter title
+  → vvx search "topic" --chapters-only
+
+User wants a ready-to-cut NLE timeline (no re-encode)
+  → vvx search "query" --export-nle fcpx|premiere|resolve --export-nle-out <path>
+
 User wants to process all videos from a channel or playlist
   → vvx sync <url> --limit N [--incremental] [--archive]
 
 User wants batch clips from search hits for editing
   → vvx gather "query" --limit N [-o output-dir] [--fast]
+
+User wants full chapter segments extracted
+  → vvx gather "query" --chapters-only --limit N
+
+User wants to index a local folder of media files
+  → vvx ingest <path>   (use --dry-run first on unknown trees)
 
 User wants to see what videos are in their archive
   → vvx library   (or vvx library --downloaded for media files only)
@@ -229,4 +358,28 @@ vvx gather "keyword" --limit 10 -o ~/Desktop/gather-clips
 # Recipe 3: Archive inventory and analytics
 vvx library
 vvx sql "SELECT uploader, COUNT(*) AS videos FROM videos GROUP BY uploader ORDER BY videos DESC LIMIT 10;"
+
+# Recipe 4: Two-step AI clip discovery (structural pre-filter → gather)
+vvx search --longest-monologue --uploader "Lex Fridman" --limit 10
+# → agent evaluates transcriptExcerpt from each result
+# → agent calls: vvx gather "approved keyword" --snap chapter --limit 5
+
+# Recipe 5: NLE export workflow (zero re-encode)
+vvx search "neuralink" --export-nle fcpx --export-nle-out ~/Desktop/neuralink.fcpxml --dry-run
+# → verify clipCount and skippedCount
+vvx search "neuralink" --export-nle fcpx --export-nle-out ~/Desktop/neuralink.fcpxml
+
+# Recipe 6: Index local project rushes
+vvx ingest /Volumes/Projects/InterviewRushes --dry-run
+# → check summary: indexed/skipped counts
+vvx ingest /Volumes/Projects/InterviewRushes
+vvx search "topic" --rag
+
+# Recipe 7: Find the moment two ideas collide
+vvx search "AGI AND national security" --within 45 --limit 5
+# → use reproduceCommand from results to cut with vvx clip
+
+# Recipe 8: Gather with engagement filter and sidecars
+vvx gather "Tesla" --min-views 1000000 --min-likes 50000 --pad 2 --thumbnails --dry-run
+vvx gather "Tesla" --min-views 1000000 --min-likes 50000 --pad 2 --thumbnails -o ~/Desktop/tesla-clips
 ```

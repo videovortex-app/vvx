@@ -32,7 +32,7 @@ struct DocsCommand: AsyncParsableCommand {
 
     // MARK: - Arguments & flags
 
-    @Argument(help: "Show docs for a specific command: sense, fetch, search, gather, sync, clip, library, sql, reindex, doctor, engine")
+    @Argument(help: "Show docs for a specific command: sense, fetch, search, gather, sync, clip, ingest, library, sql, reindex, doctor, engine")
     var topic: String?
 
     @Flag(name: .long, help: "Print error codes and agentAction recovery table only.")
@@ -67,6 +67,7 @@ struct DocsCommand: AsyncParsableCommand {
             case "gather":                   print(gatherSection)
             case "sync":                     print(syncSection)
             case "clip":                     print(clipSection)
+            case "ingest":                   print(ingestSection)
             case "library", "lib":           print(librarySection)
             case "sql":                      print(sqlSection)
             case "reindex", "re":            print(reindexSection)
@@ -75,7 +76,7 @@ struct DocsCommand: AsyncParsableCommand {
             case "errors", "error":          print(errorsSection)
             case "examples", "ex":           print(examplesSection)
             default:
-                fputs("Unknown topic '\(t)'. Valid topics: sense, fetch, search, gather, sync, clip, library, sql, reindex, doctor, engine, errors, examples\n", stderr)
+                fputs("Unknown topic '\(t)'. Valid topics: sense, fetch, search, gather, sync, clip, ingest, library, sql, reindex, doctor, engine, errors, examples\n", stderr)
                 throw ExitCode.failure
             }
             return
@@ -107,6 +108,8 @@ private extension DocsCommand {
         \(syncSection)
 
         \(clipSection)
+
+        \(ingestSection)
 
         \(librarySection)
 
@@ -783,6 +786,65 @@ private extension DocsCommand {
     }
 }
 
+// MARK: - Section: ingest
+
+private extension DocsCommand {
+    var ingestSection: String {
+        """
+        ## ingest — Index a local folder of video files
+
+        Recursively scans a directory for video files, matches sibling sidecars (.srt,
+        .info.json), and indexes discovered media into vortex.db using absolute paths —
+        **without moving, copying, or modifying any user files**.
+
+        Use this when the user has existing footage on disk (NAS, external drive, project
+        folder, ~/Downloads) and wants to search it with `vvx search` or extract clips
+        with `vvx gather` without downloading anything through yt-dlp.
+
+        ### Usage
+        ```
+        vvx ingest <path>
+        vvx ingest <path> --dry-run           # walk + match, no DB writes or ffprobe
+        vvx ingest <path> --force-reindex     # re-upsert paths already in vortex.db
+        vvx ingest <path> --extensions mp4,mov,mkv   # extra video types (default: mp4)
+        vvx ingest <path> --verbose           # print skip details to stderr
+        ```
+
+        Relative paths are resolved to absolute before any DB write.
+
+        ### Sidecar matching
+        For `…/My Interview.mp4`, sidecars with the **same basename** in the same directory
+        are matched: `My Interview.srt`, `My Interview.en.srt`, `My Interview.info.json`.
+        Unrelated `.json` files in the folder are ignored.
+
+        ### Deduplication
+        Files already in vortex.db by absolute path are skipped unless `--force-reindex`
+        is passed. This makes repeated `vvx ingest` safe on the same folder.
+
+        ### stdout — NDJSON
+        One line per indexed/skipped file, then a final summary line:
+        ```json
+        {"type":"summary","indexed":47,"skipped":12,"skipped_reasons":{"non_video":8,"invalid_sidecar":0,"corrupt_media":1,"already_indexed":3},"malformed_info_json_count":2}
+        ```
+        All `skipped_reasons` keys are **always present** (value `0` if none). Agents must
+        check `skipped_reasons.already_indexed` to distinguish a no-op from a real error.
+
+        ### stderr
+        Progress heartbeat every ~100 files: `Scanning… N files checked, M indexed.`
+        When `--dry-run` is active, prefix changes to: `DRY-RUN: Scanning… N files checked, M indexed.`
+
+        ### Agent rules for ingest
+        - Always run `--dry-run` first on unknown or very large trees.
+        - Read `malformed_info_json_count` from the summary: non-zero means some `.info.json`
+          files were unreadable but the run still succeeded (partial metadata only).
+        - After ingest completes, use `vvx search` or `vvx gather` as normal — indexed local
+          files are treated identically to files downloaded via `vvx fetch --archive`.
+        - `PERMISSION_DENIED` on the root path → supply a valid, readable directory.
+        - Symlinks are not followed to prevent cycles.
+        """
+    }
+}
+
 // MARK: - Section: library
 
 private extension DocsCommand {
@@ -1066,6 +1128,9 @@ private extension DocsCommand {
         | `SQL_INVALID` | Only single SELECT statements are permitted. Run `vvx sql --schema` to see tables. |
         | `PLAYLIST_UNAVAILABLE` | Verify the URL is public and accessible, then retry. Use `--browser safari` for private content. |
         | `CLIP_FAILED` | Retry with `--fast` flag, or verify the video file is not corrupt. Run `vvx doctor`. |
+        | `PRO_REQUIRED` | `gather` and `search --export-nle` are Pro features. During beta all features are allowed (fail-open). If this code appears, inform the user to upgrade at https://videovortex.app |
+        | `NLE_NO_LOCAL_FILES` | Every search hit matched but no local archive file exists for any of them. Run `vvx fetch "<url>" --archive` for the missing source videos, then retry NLE export. |
+        | `NLE_WRITE_FAILED` | The NLE export file could not be written (permissions issue, disk full, or bad output path). Check the path and disk space, then retry. |
         | `UNKNOWN_ERROR` | Run `vvx doctor` for full diagnosis. Retry with `--verbose` for raw output. |
 
         ### Escalation: when to involve a human
@@ -1171,11 +1236,74 @@ private extension DocsCommand {
         # → requiresManual=true items (e.g. brew install yt-dlp) must be run by user/agent
         ```
 
+        ### Pattern 11: Batch clip extraction (gather)
+        ```bash
+        # Dry-run first to see what would be extracted
+        vvx gather "artificial general intelligence" --limit 10 --dry-run
+        # → NDJSON planned clips + final summary line with outputDir
+
+        # Real run with sidecars and NLE handles
+        vvx gather "artificial general intelligence" --limit 10 --pad 2
+        # → MP4s + re-timed .srt + manifest.json + clips.md in Gather_<query>_<timestamp>/
+        # → Final line: {"success":true,"summary":true,"outputDir":"…","manifestPath":"…"}
+
+        # Chapter-first: extract full creator-defined segments
+        vvx gather "AI safety" --chapters-only --limit 5 --pad 0
+        ```
+
+        ### Pattern 12: NLE export — zero re-encode timeline (Pro)
+        ```bash
+        # Dry-run to check available clips before writing the file
+        vvx search "neuralink" --export-nle fcpx --export-nle-out ~/Desktop/cuts.fcpxml --dry-run
+
+        # Write Final Cut Pro XML (drag into FCP — instant timeline, archive files referenced in-place)
+        vvx search "neuralink" --export-nle fcpx --export-nle-out ~/Desktop/cuts.fcpxml
+
+        # Premiere Pro
+        vvx search "neuralink" --export-nle premiere --export-nle-out ~/Desktop/cuts.xml
+
+        # DaVinci Resolve
+        vvx search "neuralink" --export-nle resolve --export-nle-out ~/Desktop/cuts.edl
+        ```
+        If source files are missing, `NLE_NO_LOCAL_FILES` is returned.
+        Run `vvx fetch "<url>" --archive` for each missing video, then retry.
+
+        ### Pattern 13: Two-step AI clip discovery
+        ```bash
+        # Step 1 — find best structural candidates (no query needed)
+        vvx search --longest-monologue --uploader "Lex Fridman" --limit 10
+        # → Each result line has transcriptExcerpt (≤1000 chars) + reproduceCommand
+
+        # Step 1b — proximity: find the moment two topics collide
+        vvx search "AGI AND national security" --within 45 --limit 5
+
+        # Step 2 — agent evaluates transcriptExcerpt, then gathers approved clips
+        vvx gather "AGI" --snap chapter --limit 3 --pad 2
+        # → Or use reproduceCommand from step 1 results directly with `vvx clip`
+        ```
+
+        ### Pattern 14: Index local media folder
+        ```bash
+        # Preview first on unfamiliar trees
+        vvx ingest /Volumes/Projects/InterviewRushes --dry-run
+        # → Final summary: indexed:0, skipped:…, skipped_reasons:{…}, dry_run:true (no writes)
+
+        # Real index run
+        vvx ingest /Volumes/Projects/InterviewRushes
+        # → Indexes all .mp4 files; matches sibling .srt + .info.json sidecars
+
+        # Then search and gather as normal
+        vvx search "product launch" --rag
+        vvx gather "product launch" --limit 5 -o ~/Desktop/launch-clips
+        ```
+
         ### Anti-patterns (do not do these)
         - ❌ Never call `vvx fetch` when you only need to read content. Use `vvx sense`.
         - ❌ Never load a full transcript > 8000 tokens into context. Use chapters + search.
         - ❌ Never tell the user "I can't access videos". Try `vvx sense` first.
         - ❌ Never ask the user to debug a vvx error. Run `vvx doctor` first.
+        - ❌ Never pass `chaptersOnly` or `exportNle` to the MCP `search` tool — those are CLI-only.
+        - ❌ Never run `vvx gather` via MCP for > 5 clips without a dry-run preview first — MCP has timeouts.
         """
     }
 }
@@ -1275,7 +1403,7 @@ private extension DocsCommand {
                   "type": "object",
                   "required": ["code", "message"],
                   "properties": {
-                    "code":        { "type": "string", "enum": ["VIDEO_UNAVAILABLE","PLATFORM_UNSUPPORTED","ENGINE_NOT_FOUND","NETWORK_ERROR","PARSE_ERROR","RATE_LIMITED","FFMPEG_NOT_FOUND","DISK_FULL","PERMISSION_DENIED","INVALID_TIME_RANGE","INDEX_EMPTY","INDEX_CORRUPT","SQL_INVALID","PLAYLIST_UNAVAILABLE","CLIP_FAILED","UNKNOWN_ERROR"] },
+                    "code":        { "type": "string", "enum": ["VIDEO_UNAVAILABLE","PLATFORM_UNSUPPORTED","ENGINE_NOT_FOUND","NETWORK_ERROR","PARSE_ERROR","RATE_LIMITED","FFMPEG_NOT_FOUND","DISK_FULL","PERMISSION_DENIED","INVALID_TIME_RANGE","INDEX_EMPTY","INDEX_CORRUPT","SQL_INVALID","PLAYLIST_UNAVAILABLE","CLIP_FAILED","PRO_REQUIRED","NLE_NO_LOCAL_FILES","NLE_WRITE_FAILED","UNKNOWN_ERROR"] },
                     "message":     { "type": "string" },
                     "url":         { "type": ["string", "null"] },
                     "detail":      { "type": ["string", "null"] },

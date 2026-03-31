@@ -558,7 +558,10 @@ final class McpToolRegistry: Sendable {
         \n\
         Schema cheat sheet: \
         • videos — id (URL), title, platform, uploader, duration_seconds, upload_date, \
-          sensed_at, archived_at, transcript_path, video_path, view_count \
+          sensed_at, archived_at, transcript_path, video_path, view_count, \
+          like_count (null pre-Phase3 or unsupported platform), \
+          comment_count (null pre-Phase3 or unsupported platform), \
+          description, chapters (JSON array) \
         • transcript_blocks — video_id, block_index, start_seconds, end_seconds, \
           start_time, end_time, text, word_count, estimated_tokens, chapter_index \
         \n\
