@@ -115,6 +115,9 @@ struct DoctorCommand: AsyncParsableCommand {
             checks.append(await checkConnectivity(resolver: resolver, config: config))
         }
 
+        // Skills checks are advisory: they never affect the exit code.
+        checks.append(contentsOf: checkSkills())
+
         return checks
     }
 
@@ -298,6 +301,119 @@ struct DoctorCommand: AsyncParsableCommand {
             detail: "\(tilded): ok, \(count) video\(count == 1 ? "" : "s") indexed\(engSuffix)",
             fixCommand: hasEngg ? nil : "vvx reindex",
             requiresManual: false
+        )
+    }
+
+    // MARK: - Skills checks (advisory only)
+
+    private func checkSkills() -> [DoctorCheck] {
+        [checkSkillsCatalog(), checkSkillsDirectory(), checkSkillsInstalled()]
+    }
+
+    private func checkSkillsCatalog() -> DoctorCheck {
+        let cacheURL = SkillsManager.catalogCacheURL
+        let fm       = FileManager.default
+
+        guard fm.fileExists(atPath: cacheURL.path) else {
+            return DoctorCheck(
+                name: "skillsCatalog",
+                passed: false,
+                detail: "No catalog cached. Run 'vvx skills update'.",
+                fixCommand: "vvx skills update",
+                requiresManual: true
+            )
+        }
+
+        guard let data    = try? Data(contentsOf: cacheURL),
+              let catalog = try? JSONDecoder().decode(SkillsCatalog.self, from: data)
+        else {
+            return DoctorCheck(
+                name: "skillsCatalog",
+                passed: false,
+                detail: "Catalog is corrupt. Run 'vvx skills update'.",
+                fixCommand: "vvx skills update",
+                requiresManual: true
+            )
+        }
+
+        guard let mod = SkillsManager.catalogModDate() else {
+            return DoctorCheck(name: "skillsCatalog", passed: true,
+                               detail: "\(catalog.totalSkills) skills cached")
+        }
+
+        let age = Date().timeIntervalSince(mod)
+        if age > SkillsManager.maxCacheAge {
+            let days = Int(age / 86400)
+            return DoctorCheck(
+                name: "skillsCatalog",
+                passed: false,
+                detail: "Stale (\(days) day\(days == 1 ? "" : "s")). Run 'vvx skills update'.",
+                fixCommand: "vvx skills update",
+                requiresManual: true
+            )
+        }
+
+        let ageStr = SkillsManager.formattedAge(mod)
+        return DoctorCheck(
+            name: "skillsCatalog",
+            passed: true,
+            detail: "\(catalog.totalSkills) skill\(catalog.totalSkills == 1 ? "" : "s") cached (updated \(ageStr))"
+        )
+    }
+
+    private func checkSkillsDirectory() -> DoctorCheck {
+        let vvxDir = FileManager.default.homeDirectoryForCurrentUser.appendingPathComponent(".vvx")
+        let tilded = "~/.vvx/"
+        let fm     = FileManager.default
+
+        guard fm.fileExists(atPath: vvxDir.path) else {
+            return DoctorCheck(
+                name: "skillsDir",
+                passed: false,
+                detail: "\(tilded) not found — will be created on first install."
+            )
+        }
+
+        guard fm.isWritableFile(atPath: vvxDir.path) else {
+            return DoctorCheck(
+                name: "skillsDir",
+                passed: false,
+                detail: "\(tilded) exists but is not writable.",
+                fixCommand: "chmod 755 \(vvxDir.path)",
+                requiresManual: true
+            )
+        }
+
+        return DoctorCheck(name: "skillsDir", passed: true, detail: "\(tilded) is writable")
+    }
+
+    private func checkSkillsInstalled() -> DoctorCheck {
+        let manifest = SkillsManager.loadManifest()
+        let count    = manifest.installed.count
+
+        guard count > 0 else {
+            return DoctorCheck(name: "skillsInstalled", passed: true, detail: "No skills installed.")
+        }
+
+        let missing = manifest.installed.filter {
+            !FileManager.default.fileExists(atPath: $0.path)
+        }
+
+        if missing.isEmpty {
+            return DoctorCheck(
+                name: "skillsInstalled",
+                passed: true,
+                detail: "\(count) installed, all files present"
+            )
+        }
+
+        let first  = missing[0]
+        let tilded = first.path.replacingOccurrences(of: NSHomeDirectory(), with: "~")
+        let extra  = missing.count > 1 ? " (and \(missing.count - 1) more)" : ""
+        return DoctorCheck(
+            name: "skillsInstalled",
+            passed: false,
+            detail: "\(first.slug) file not found at \(tilded)\(extra)"
         )
     }
 
@@ -535,10 +651,13 @@ struct DoctorCommand: AsyncParsableCommand {
         case "transcriptsDir": return "Transcripts dir"
         case "downloadsDir":   return "Downloads dir"
         case "archiveDir":     return "Archive dir"
-        case "docsVersion":    return "Docs version"
-        case "connectivity":   return "Connectivity"
-        case "vortexDB":       return "Archive DB"
-        default:               return name
+        case "docsVersion":      return "Docs version"
+        case "connectivity":     return "Connectivity"
+        case "vortexDB":         return "Archive DB"
+        case "skillsCatalog":    return "Skills catalog"
+        case "skillsDir":        return "Skills dir"
+        case "skillsInstalled":  return "Skills installed"
+        default:                 return name
         }
     }
 
