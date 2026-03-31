@@ -1,0 +1,94 @@
+name: Export CLI Spec
+
+# Runs after every push to main.  Builds the release binary, exports
+# `vvx docs` to docs/VVX_CLI_SPEC.md, and commits the result back so
+# skill authors always read the spec that matches the compiled binary.
+#
+# Optional cross-repo push
+#   If the repository variable VVX_SKILLS_REPO and the secret
+#   SKILLS_REPO_SYNC_TOKEN are configured, the updated spec is also pushed
+#   to that repo (e.g. videovortex-app/vvx-skills).
+#   VVX_SKILLS_REPO defaults to "videovortex-app/vvx-skills" if the var
+#   is not set but the PAT is present.
+
+on:
+  push:
+    branches: ["main"]
+
+jobs:
+  export-spec:
+    runs-on: ubuntu-latest
+    container: swift:6.0-jammy
+
+    permissions:
+      contents: write   # needed to push the updated spec back to this repo
+
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+        with:
+          # Persist the GITHUB_TOKEN credential so the later git push works
+          # inside the container without an extra PAT.
+          token: ${{ secrets.GITHUB_TOKEN }}
+          persist-credentials: true
+
+      - name: Install system dependencies
+        run: |
+          apt-get update -qq
+          apt-get install -y --no-install-recommends \
+            libsqlite3-dev pkg-config ffmpeg git ca-certificates
+
+      - name: Build release binary
+        run: swift build -c release
+
+      - name: Export CLI spec
+        run: .build/release/vvx docs > docs/VVX_CLI_SPEC.md
+
+      - name: Commit spec to this repo
+        run: |
+          git config --global user.name  "github-actions[bot]"
+          git config --global user.email "github-actions[bot]@users.noreply.github.com"
+          # safe.directory is required when Actions runs inside a container
+          git config --global --add safe.directory "$GITHUB_WORKSPACE"
+
+          git add docs/VVX_CLI_SPEC.md
+
+          if git diff --staged --quiet; then
+            echo "VVX_CLI_SPEC.md is already up to date — nothing to commit."
+          else
+            git commit -m "chore(docs): auto-export CLI spec from compiled binary [skip ci]"
+            git push
+          fi
+
+      # -----------------------------------------------------------------------
+      # Optional: mirror the spec to a separate vvx-skills repository.
+      # Requires:
+      #   Secret  SKILLS_REPO_SYNC_TOKEN — a fine-grained PAT with contents:write
+      #                                  on the skills repo.
+      #   Variable VVX_SKILLS_REPO    — owner/repo slug (optional, see default).
+      # -----------------------------------------------------------------------
+      - name: Push spec to vvx-skills repo
+        if: ${{ env.SKILLS_REPO_SYNC_TOKEN != '' }}
+        env:
+          SKILLS_REPO_SYNC_TOKEN: ${{ secrets.SKILLS_REPO_SYNC_TOKEN }}
+          VVX_SKILLS_REPO: ${{ vars.VVX_SKILLS_REPO || 'videovortex-app/vvx-skills' }}
+        run: |
+          TARGET_DIR="$(mktemp -d)"
+          git clone \
+            "https://x-access-token:${SKILLS_REPO_SYNC_TOKEN}@github.com/${VVX_SKILLS_REPO}.git" \
+            "$TARGET_DIR"
+
+          cp docs/VVX_CLI_SPEC.md "$TARGET_DIR/VVX_CLI_SPEC.md"
+
+          cd "$TARGET_DIR"
+          git config user.name  "github-actions[bot]"
+          git config user.email "github-actions[bot]@users.noreply.github.com"
+          git add VVX_CLI_SPEC.md
+
+          if git diff --staged --quiet; then
+            echo "Skills repo spec already up to date — nothing to push."
+          else
+            VVX_VERSION=$(.build/release/vvx --version 2>/dev/null || echo "unknown")
+            git commit -m "chore: sync CLI spec from vvx ${VVX_VERSION} [skip ci]"
+            git push
+          fi

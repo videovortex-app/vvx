@@ -24,3 +24,12 @@ jobs:
 
     - name: Run Tests
       run: swift test
+
+    - name: Install Python 3
+      run: apt-get install -y --no-install-recommends python3
+
+    - name: Check DocsCommand.swift coverage (drift guard)
+      # Fails the build if a developer adds a parser flag (@Option / @Flag)
+      # without documenting it in DocsCommand.swift.
+      # See scripts/check_docs_coverage.py for details.
+      run: python3 scripts/check_docs_coverage.py --vvx .build/release/vvx
