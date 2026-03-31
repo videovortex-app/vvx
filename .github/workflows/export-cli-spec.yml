@@ -92,3 +92,36 @@ jobs:
             git commit -m "chore: sync CLI spec from vvx ${VVX_VERSION} [skip ci]"
             git push
           fi
+
+      # -----------------------------------------------------------------------
+      # Optional: mirror the spec to the VideoVortex mac app repository.
+      # Requires:
+      #   Secret  SKILLS_REPO_SYNC_TOKEN — a fine-grained PAT with contents:write
+      #                                  on the VideoVortex repo.
+      # -----------------------------------------------------------------------
+      - name: Push spec to VideoVortex repo
+        if: ${{ env.SKILLS_REPO_SYNC_TOKEN != '' }}
+        env:
+          SKILLS_REPO_SYNC_TOKEN: ${{ secrets.SKILLS_REPO_SYNC_TOKEN }}
+          VIDEOVORTEX_REPO: videovortex-app/VideoVortex
+        run: |
+          TARGET_DIR="$(mktemp -d)"
+          git clone \
+            "https://x-access-token:${SKILLS_REPO_SYNC_TOKEN}@github.com/${VIDEOVORTEX_REPO}.git" \
+            "$TARGET_DIR"
+
+          mkdir -p "$TARGET_DIR/agent-docs"
+          cp docs/VVX_CLI_SPEC.md "$TARGET_DIR/agent-docs/VVX_CLI_SPEC.md"
+
+          cd "$TARGET_DIR"
+          git config user.name  "github-actions[bot]"
+          git config user.email "github-actions[bot]@users.noreply.github.com"
+          git add agent-docs/VVX_CLI_SPEC.md
+
+          if git diff --staged --quiet; then
+            echo "VideoVortex spec already up to date — nothing to push."
+          else
+            VVX_VERSION=$(.build/release/vvx --version 2>/dev/null || echo "unknown")
+            git commit -m "chore: sync CLI spec from vvx ${VVX_VERSION} [skip ci]"
+            git push
+          fi
