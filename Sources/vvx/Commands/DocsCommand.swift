@@ -32,7 +32,7 @@ struct DocsCommand: AsyncParsableCommand {
 
     // MARK: - Arguments & flags
 
-    @Argument(help: "Show docs for a specific command: sense, fetch, search, gather, sync, clip, library, sql, reindex, doctor, engine")
+    @Argument(help: "Show docs for a specific command: sense, fetch, search, gather, sync, clip, ingest, library, sql, reindex, doctor, engine")
     var topic: String?
 
     @Flag(name: .long, help: "Print error codes and agentAction recovery table only.")
@@ -67,6 +67,7 @@ struct DocsCommand: AsyncParsableCommand {
             case "gather":                   print(gatherSection)
             case "sync":                     print(syncSection)
             case "clip":                     print(clipSection)
+            case "ingest":                   print(ingestSection)
             case "library", "lib":           print(librarySection)
             case "sql":                      print(sqlSection)
             case "reindex", "re":            print(reindexSection)
@@ -75,7 +76,7 @@ struct DocsCommand: AsyncParsableCommand {
             case "errors", "error":          print(errorsSection)
             case "examples", "ex":           print(examplesSection)
             default:
-                fputs("Unknown topic '\(t)'. Valid topics: sense, fetch, search, gather, sync, clip, library, sql, reindex, doctor, engine, errors, examples\n", stderr)
+                fputs("Unknown topic '\(t)'. Valid topics: sense, fetch, search, gather, sync, clip, ingest, library, sql, reindex, doctor, engine, errors, examples\n", stderr)
                 throw ExitCode.failure
             }
             return
@@ -107,6 +108,8 @@ private extension DocsCommand {
         \(syncSection)
 
         \(clipSection)
+
+        \(ingestSection)
 
         \(librarySection)
 
@@ -783,6 +786,65 @@ private extension DocsCommand {
     }
 }
 
+// MARK: - Section: ingest
+
+private extension DocsCommand {
+    var ingestSection: String {
+        """
+        ## ingest — Index a local folder of video files
+
+        Recursively scans a directory for video files, matches sibling sidecars (.srt,
+        .info.json), and indexes discovered media into vortex.db using absolute paths —
+        **without moving, copying, or modifying any user files**.
+
+        Use this when the user has existing footage on disk (NAS, external drive, project
+        folder, ~/Downloads) and wants to search it with `vvx search` or extract clips
+        with `vvx gather` without downloading anything through yt-dlp.
+
+        ### Usage
+        ```
+        vvx ingest <path>
+        vvx ingest <path> --dry-run           # walk + match, no DB writes or ffprobe
+        vvx ingest <path> --force-reindex     # re-upsert paths already in vortex.db
+        vvx ingest <path> --extensions mp4,mov,mkv   # extra video types (default: mp4)
+        vvx ingest <path> --verbose           # print skip details to stderr
+        ```
+
+        Relative paths are resolved to absolute before any DB write.
+
+        ### Sidecar matching
+        For `…/My Interview.mp4`, sidecars with the **same basename** in the same directory
+        are matched: `My Interview.srt`, `My Interview.en.srt`, `My Interview.info.json`.
+        Unrelated `.json` files in the folder are ignored.
+
+        ### Deduplication
+        Files already in vortex.db by absolute path are skipped unless `--force-reindex`
+        is passed. This makes repeated `vvx ingest` safe on the same folder.
+
+        ### stdout — NDJSON
+        One line per indexed/skipped file, then a final summary line:
+        ```json
+        {"type":"summary","indexed":47,"skipped":12,"skipped_reasons":{"non_video":8,"invalid_sidecar":0,"corrupt_media":1,"already_indexed":3},"malformed_info_json_count":2}
+        ```
+        All `skipped_reasons` keys are **always present** (value `0` if none). Agents must
+        check `skipped_reasons.already_indexed` to distinguish a no-op from a real error.
+
+        ### stderr
+        Progress heartbeat every ~100 files: `Scanning… N files checked, M indexed.`
+        When `--dry-run` is active, prefix changes to: `DRY-RUN: Scanning… N files checked, M indexed.`
+
+        ### Agent rules for ingest
+        - Always run `--dry-run` first on unknown or very large trees.
+        - Read `malformed_info_json_count` from the summary: non-zero means some `.info.json`
+          files were unreadable but the run still succeeded (partial metadata only).
+        - After ingest completes, use `vvx search` or `vvx gather` as normal — indexed local
+          files are treated identically to files downloaded via `vvx fetch --archive`.
+        - `PERMISSION_DENIED` on the root path → supply a valid, readable directory.
+        - Symlinks are not followed to prevent cycles.
+        """
+    }
+}
+
 // MARK: - Section: library
 
 private extension DocsCommand {
@@ -1066,6 +1128,7 @@ private extension DocsCommand {
         | `SQL_INVALID` | Only single SELECT statements are permitted. Run `vvx sql --schema` to see tables. |
         | `PLAYLIST_UNAVAILABLE` | Verify the URL is public and accessible, then retry. Use `--browser safari` for private content. |
         | `CLIP_FAILED` | Retry with `--fast` flag, or verify the video file is not corrupt. Run `vvx doctor`. |
+        | `PRO_REQUIRED` | `gather` and `search --export-nle` are Pro features. During beta all features are allowed (fail-open). If this code appears, inform the user to upgrade at https://videovortex.app |
         | `UNKNOWN_ERROR` | Run `vvx doctor` for full diagnosis. Retry with `--verbose` for raw output. |
 
         ### Escalation: when to involve a human
@@ -1275,7 +1338,7 @@ private extension DocsCommand {
                   "type": "object",
                   "required": ["code", "message"],
                   "properties": {
-                    "code":        { "type": "string", "enum": ["VIDEO_UNAVAILABLE","PLATFORM_UNSUPPORTED","ENGINE_NOT_FOUND","NETWORK_ERROR","PARSE_ERROR","RATE_LIMITED","FFMPEG_NOT_FOUND","DISK_FULL","PERMISSION_DENIED","INVALID_TIME_RANGE","INDEX_EMPTY","INDEX_CORRUPT","SQL_INVALID","PLAYLIST_UNAVAILABLE","CLIP_FAILED","UNKNOWN_ERROR"] },
+                    "code":        { "type": "string", "enum": ["VIDEO_UNAVAILABLE","PLATFORM_UNSUPPORTED","ENGINE_NOT_FOUND","NETWORK_ERROR","PARSE_ERROR","RATE_LIMITED","FFMPEG_NOT_FOUND","DISK_FULL","PERMISSION_DENIED","INVALID_TIME_RANGE","INDEX_EMPTY","INDEX_CORRUPT","SQL_INVALID","PLAYLIST_UNAVAILABLE","CLIP_FAILED","PRO_REQUIRED","UNKNOWN_ERROR"] },
                     "message":     { "type": "string" },
                     "url":         { "type": ["string", "null"] },
                     "detail":      { "type": ["string", "null"] },
