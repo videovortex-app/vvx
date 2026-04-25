@@ -411,6 +411,18 @@ private func qualityPenalty(text: String, wordCount: Int) -> Int {
 
 private func fillerPenalty(_ text: String) -> Int {
     let weighted: [(String, Int)] = [
+        ("supporting sponsor", -24),
+        ("sponsor", -18),
+        ("sponsored", -18),
+        ("go to works.com", -24),
+        ("work os allows", -24),
+        ("vanta helps", -24),
+        ("earn and prove trust", -20),
+        ("make your app enterprise ready", -20),
+        ("go to ", -4),
+        ("use code", -12),
+        ("promo code", -16),
+        ("check out", -8),
         ("make sure to subscribe", -16),
         ("click the subscribe", -16),
         ("not subscribed", -14),
@@ -425,12 +437,37 @@ private func fillerPenalty(_ text: String) -> Int {
         ("complete beginner", -8),
         ("top 1% ai developer", -14),
         ("learn in just three weeks", -14),
+        ("you will be able to build anything", -14),
+        ("built a full startup", -8),
+        ("over 2,000 hours", -8),
         ("my claim is that by the end", -10),
         ("go ahead below the video", -12)
     ]
-    return max(-35, weighted.reduce(0) { total, item in
+    let phrasePenalty = weighted.reduce(0) { total, item in
         total + (text.contains(item.0) ? item.1 : 0)
-    })
+    }
+    return max(-35, phrasePenalty + repeatedPhrasePenalty(text))
+}
+
+private func repeatedPhrasePenalty(_ text: String) -> Int {
+    let tokens = text
+        .split(whereSeparator: \.isWhitespace)
+        .map { normalizedToken(String($0)) }
+        .filter { !$0.isEmpty }
+    guard tokens.count >= 8 else { return 0 }
+
+    var repeated = 0
+    for width in 2 ... 4 {
+        var counts: [String: Int] = [:]
+        guard tokens.count >= width else { continue }
+        for idx in 0 ... (tokens.count - width) {
+            let phrase = tokens[idx ..< idx + width].joined(separator: " ")
+            counts[phrase, default: 0] += 1
+        }
+        repeated += counts.values.filter { $0 >= 3 }.count
+    }
+
+    return -min(14, repeated * 3)
 }
 
 private func blockSignalScore(_ text: String) -> Int {
@@ -491,6 +528,7 @@ private func selectWithDiversity(
         var bestIndex: Int?
         var bestSelectionScore = Int.min
         var bestDiversity = 15
+        let selectedChapterCounts = chapterCounts(for: selected.map(\.candidate))
 
         for idx in pool.indices {
             let candidate = pool[idx]
@@ -507,11 +545,19 @@ private func selectWithDiversity(
                 continue
             }
 
+            let sameChapterCount = selectedChapterCounts[chapterKey(candidate)] ?? 0
+            if selected.count > 0,
+               sameChapterCount >= 2,
+               pool.count > limit - selected.count {
+                continue
+            }
+
             let diversity = max(0, Int(((1.0 - maxSimilarity) * 15.0).rounded()))
             let selectionScore = candidate.baseScore
                 + diversity
                 - Int((maxSimilarity * 12.0).rounded())
                 - Int((maxTemporalOverlap * 18.0).rounded())
+                - (sameChapterCount * 14)
             if selectionScore > bestSelectionScore {
                 bestSelectionScore = selectionScore
                 bestIndex = idx
@@ -524,6 +570,20 @@ private func selectWithDiversity(
     }
 
     return selected
+}
+
+private func chapterCounts(for candidates: [MomentCandidate]) -> [String: Int] {
+    var counts: [String: Int] = [:]
+    for candidate in candidates {
+        counts[chapterKey(candidate), default: 0] += 1
+    }
+    return counts
+}
+
+private func chapterKey(_ candidate: MomentCandidate) -> String {
+    if let chapterIndex = candidate.chapterIndex { return "idx:\(chapterIndex)" }
+    if let chapterTitle = candidate.chapterTitle { return "title:\(chapterTitle.lowercased())" }
+    return "time:\(Int(candidate.startSeconds / 120.0))"
 }
 
 private func similarity(_ a: MomentCandidate, _ b: MomentCandidate) -> Double {

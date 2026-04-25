@@ -144,4 +144,60 @@ struct MomentRankerTests {
         #expect(ranked.first?.chapterTitle == "Cost analysis")
         #expect(ranked.first?.cleanText.contains("40x cheaper") == true)
     }
+
+    @Test("Sponsor reads are penalized below product insights")
+    func sponsorReadsArePenalized() {
+        let blocks = [
+            block(1, 0, "Supporting sponsor Vanta helps over 15000 companies earn and prove trust with customers.", chapterIndex: 0),
+            block(2, 10, "Go to works.com to make your app enterprise ready today with delightful APIs.", chapterIndex: 0),
+            block(3, 100, "A lot of product changes happen when a new model removes features that were only crutches for model limitations.", chapterIndex: 1),
+            block(4, 110, "The classic example is a to-do list because the newer model can keep the plan in its own context.", chapterIndex: 1),
+            block(5, 120, "This means the product gets simpler as model intelligence improves instead of adding more UI.", chapterIndex: 1),
+        ]
+        let chapters = [
+            VideoChapter(title: "Sponsor", startTime: 0, endTime: 100, estimatedTokens: nil),
+            VideoChapter(title: "How new models force product changes", startTime: 100, endTime: 140, estimatedTokens: nil),
+        ]
+        let result = SenseResult(
+            url: "https://example.com/video",
+            title: "Product changes",
+            transcriptSource: .manual,
+            transcriptBlocks: blocks,
+            estimatedTokens: blocks.map(\.estimatedTokens).reduce(0, +),
+            chapters: chapters
+        )
+
+        let ranked = MomentRanker.rankedMoments(for: result, limit: 1)
+
+        #expect(ranked.first?.chapterTitle == "How new models force product changes")
+        #expect(ranked.first?.cleanText.contains("product gets simpler") == true)
+    }
+
+    @Test("Diversity penalizes repeated chapter picks")
+    func diversityPenalizesRepeatedChapterPicks() {
+        let blocks = [
+            block(1, 0, "The key cost result is 40 percent cheaper because token caching removes repeated work.", chapterIndex: 0),
+            block(2, 10, "This means one automation costs pennies instead of dollars and can run more often.", chapterIndex: 0),
+            block(3, 100, "The key cost result is 35 percent cheaper because batching removes repeated work.", chapterIndex: 0),
+            block(4, 110, "This means another automation costs pennies instead of dollars and can run more often.", chapterIndex: 0),
+            block(5, 220, "The mistake in the old workflow was trusting long context after it starts degrading past 128k tokens.", chapterIndex: 1),
+            block(6, 230, "This means the safer workflow is compaction before the model begins losing details.", chapterIndex: 1),
+        ]
+        let chapters = [
+            VideoChapter(title: "Cost", startTime: 0, endTime: 200, estimatedTokens: nil),
+            VideoChapter(title: "Context degradation", startTime: 200, endTime: 260, estimatedTokens: nil),
+        ]
+        let result = SenseResult(
+            url: "https://example.com/video",
+            title: "Cost and context",
+            transcriptSource: .manual,
+            transcriptBlocks: blocks,
+            estimatedTokens: blocks.map(\.estimatedTokens).reduce(0, +),
+            chapters: chapters
+        )
+
+        let ranked = MomentRanker.rankedMoments(for: result, limit: 2)
+
+        #expect(Set(ranked.compactMap(\.chapterTitle)).count == 2)
+    }
 }
