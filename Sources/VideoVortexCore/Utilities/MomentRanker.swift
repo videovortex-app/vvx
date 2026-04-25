@@ -212,9 +212,18 @@ private func buildWindow(
 ) -> (start: Int, end: Int)? {
     guard blocks.indices.contains(startIndex) else { return nil }
     let startSeconds = blocks[startIndex].startSeconds
+    let startChapterIndex = blocks[startIndex].chapterIndex
     var endIndex = startIndex
 
     while endIndex + 1 < blocks.count {
+        let nextBlock = blocks[endIndex + 1]
+        if let startChapterIndex,
+           let nextChapterIndex = nextBlock.chapterIndex,
+           nextChapterIndex != startChapterIndex,
+           blocks[endIndex].endSeconds - startSeconds >= config.minDurationSeconds {
+            break
+        }
+
         let nextEnd = blocks[endIndex + 1].endSeconds
         if nextEnd - startSeconds > config.maxDurationSeconds { break }
         endIndex += 1
@@ -253,6 +262,7 @@ private func makeCandidate(
     let chapterIndex = chapterContext.index
     let chapterTitle = chapterContext.title
     let lower = text.lowercased()
+    guard !isHardRejectedLeadIn(text: lower, chapterTitle: chapterTitle) else { return nil }
 
     let topicScore = topicRelevanceScore(keywords: keywords, topicTerms: topicTerms)
     let insightScore = insightScore(lower)
@@ -264,7 +274,12 @@ private func makeCandidate(
         firstStart: first.startSeconds,
         chapters: chapters
     )
-    let qualityPenalty = qualityPenalty(text: lower, wordCount: words)
+    let qualityPenalty = qualityPenalty(
+        text: lower,
+        wordCount: words,
+        chapterTitle: chapterTitle,
+        startSeconds: first.startSeconds
+    )
 
     let breakdown = MomentScoreBreakdown(
         topicRelevance: topicScore,
@@ -364,8 +379,7 @@ private func chapterScore(
 ) -> Int {
     guard let chapterTitle, let chapterIndex, chapters.indices.contains(chapterIndex) else { return 0 }
     let lower = chapterTitle.lowercased()
-    let generic = ["intro", "introduction", "outro", "conclusion", "final thoughts", "sponsor", "ad"]
-    if generic.contains(where: { lower.contains($0) }) { return 0 }
+    if isLowSignalChapterTitle(lower) { return 0 }
 
     var score = 5
     if firstStart - chapters[chapterIndex].startTime <= 20 { score += 3 }
@@ -396,17 +410,45 @@ private func resolveChapterContext(
     return (nil, nil)
 }
 
-private func qualityPenalty(text: String, wordCount: Int) -> Int {
+private func qualityPenalty(
+    text: String,
+    wordCount: Int,
+    chapterTitle: String?,
+    startSeconds: Double
+) -> Int {
     var penalty = 0
     if wordCount < 28 { penalty -= 8 }
     if text.range(of: #"\b(um|uh|like|you know)\b"#, options: .regularExpression) != nil { penalty -= 3 }
     if text.range(of: #"\b(\w+)\s+\1\b"#, options: [.regularExpression, .caseInsensitive]) != nil { penalty -= 4 }
+    penalty += leadingFragmentPenalty(text)
     penalty += fillerPenalty(text)
+    penalty += genericSectionPenalty(chapterTitle: chapterTitle, startSeconds: startSeconds, text: text)
     if text.count > 0 {
         let punctuationCount = text.filter { ".?!,".contains($0) }.count
         if Double(punctuationCount) / Double(text.count) < 0.005 { penalty -= 3 }
     }
-    return max(-35, penalty)
+    return max(-45, penalty)
+}
+
+private func leadingFragmentPenalty(_ text: String) -> Int {
+    let trimmed = text.trimmingCharacters(in: .whitespacesAndNewlines)
+    guard let firstRaw = trimmed.split(whereSeparator: \.isWhitespace).first else { return 0 }
+
+    let first = normalizedToken(String(firstRaw))
+    let weakStarts: Set<String> = [
+        "and", "but", "because", "so", "then", "than", "or", "to", "of",
+        "for", "from", "with", "without", "instead", "rather", "into", "out",
+        "comes", "came", "coming", "was", "were", "is", "are", "be", "been",
+        "being", "does", "did", "do", "has", "have", "had", "edge", "game",
+        "guy", "kernel", "approval"
+    ]
+
+    var penalty = weakStarts.contains(first) ? -8 : 0
+    if ["uh", "um", "yeah", "okay"].contains(first) { penalty -= 5 }
+    if firstRaw.hasSuffix(".") && wordCount(trimmed) > 12 { penalty -= 5 }
+    if trimmed.hasPrefix(">>") { penalty -= 2 }
+
+    return max(-12, penalty)
 }
 
 private func fillerPenalty(_ text: String) -> Int {
@@ -415,10 +457,18 @@ private func fillerPenalty(_ text: String) -> Int {
         ("sponsor", -18),
         ("sponsored", -18),
         ("go to works.com", -24),
+        ("go to workos.com", -24),
+        ("workos.com", -24),
         ("work os allows", -24),
         ("vanta helps", -24),
+        ("vanta automates", -24),
+        ("vanta.com", -24),
         ("earn and prove trust", -20),
         ("make your app enterprise ready", -20),
+        ("as a listener", -14),
+        ("learn more at", -12),
+        ("customer data", -6),
+        ("compliant fast", -12),
         ("go to ", -4),
         ("use code", -12),
         ("promo code", -16),
@@ -447,6 +497,71 @@ private func fillerPenalty(_ text: String) -> Int {
         total + (text.contains(item.0) ? item.1 : 0)
     }
     return max(-35, phrasePenalty + repeatedPhrasePenalty(text))
+}
+
+private func isHardRejectedLeadIn(text: String, chapterTitle: String?) -> Bool {
+    if isAdChapterTitle(chapterTitle?.lowercased()) { return true }
+
+    let prefix = String(text.prefix(700))
+    if hardLeadInScore(prefix) >= 18 { return true }
+
+    return false
+}
+
+private func hardLeadInScore(_ text: String) -> Int {
+    let weighted: [(String, Int)] = [
+        ("supporting sponsor", 18),
+        ("sponsored", 18),
+        ("vanta.com", 18),
+        ("workos.com", 18),
+        ("works.com", 16),
+        ("promo code", 16),
+        ("use code", 14),
+        ("as a listener", 14),
+        ("learn more at", 10),
+        ("$1,000 off", 10),
+        ("1,000 off", 10),
+        ("make sure to subscribe", 18),
+        ("click the subscribe", 18),
+        ("join the new society", 18),
+        ("learn in just three weeks", 16),
+        ("complete beginner", 10),
+        ("top 1% ai developer", 14),
+    ]
+    var score = weighted.reduce(0) { total, item in
+        total + (text.contains(item.0) ? item.1 : 0)
+    }
+
+    let hasBrandAdTerm = text.range(of: #"\b(vanta|workos|work os)\b"#, options: .regularExpression) != nil
+    let hasCommercialCue = text.range(of: #"\b(go to|learn more at|listener|off|promo|code)\b"#, options: .regularExpression) != nil
+    if hasBrandAdTerm && hasCommercialCue { score += 12 }
+
+    return score
+}
+
+private func genericSectionPenalty(chapterTitle: String?, startSeconds: Double, text: String) -> Int {
+    guard let chapterTitle = chapterTitle?.lowercased(), isIntroChapterTitle(chapterTitle) else { return 0 }
+
+    var penalty = -6
+    if startSeconds < 120 { penalty -= 5 }
+    if insightScore(text) < 10 && concretenessScore(text) < 10 { penalty -= 4 }
+    return penalty
+}
+
+private func isLowSignalChapterTitle(_ lower: String) -> Bool {
+    isIntroChapterTitle(lower)
+        || isAdChapterTitle(lower)
+        || ["outro", "conclusion", "final thoughts"].contains(where: { lower.contains($0) })
+}
+
+private func isIntroChapterTitle(_ lower: String?) -> Bool {
+    guard let lower else { return false }
+    return ["intro", "introduction"].contains(where: { lower.contains($0) })
+}
+
+private func isAdChapterTitle(_ lower: String?) -> Bool {
+    guard let lower else { return false }
+    return ["sponsor", "ad read", "advertisement", "promo"].contains(where: { lower.contains($0) })
 }
 
 private func repeatedPhrasePenalty(_ text: String) -> Int {

@@ -173,6 +173,90 @@ struct MomentRankerTests {
         #expect(ranked.first?.cleanText.contains("product gets simpler") == true)
     }
 
+    @Test("Sponsor lead-ins are rejected even when mixed into real chapters")
+    func sponsorLeadInsAreRejectedWhenMixedIntoRealChapters() {
+        let blocks = [
+            block(1, 0, "and prove trust with their customers. Teams are building and shipping products faster than ever thanks to AI.", chapterIndex: 0),
+            block(2, 10, "Vanta automates compliance and risk management. Learn more at vanta.com/lenny and get 1000 off.", chapterIndex: 0),
+            block(3, 30, "A lot of product changes happen when a new model removes features that were only crutches for model limitations.", chapterIndex: 0),
+            block(4, 40, "The classic example is a to-do list because the newer model can keep the plan in its own context.", chapterIndex: 0),
+            block(5, 50, "This means the product gets simpler as model intelligence improves instead of adding more UI.", chapterIndex: 0),
+            block(6, 140, "The second insight is that PMs need to test model behavior with concrete examples before changing roadmaps.", chapterIndex: 1),
+        ]
+        let chapters = [
+            VideoChapter(title: "Cat's PM tech stack and internal tools", startTime: 0, endTime: 120, estimatedTokens: nil),
+            VideoChapter(title: "PM skills", startTime: 120, endTime: 180, estimatedTokens: nil),
+        ]
+        let result = SenseResult(
+            url: "https://example.com/video",
+            title: "Product changes",
+            transcriptSource: .manual,
+            transcriptBlocks: blocks,
+            estimatedTokens: blocks.map(\.estimatedTokens).reduce(0, +),
+            chapters: chapters
+        )
+
+        let ranked = MomentRanker.rankedMoments(for: result, limit: 1)
+
+        #expect(ranked.first?.cleanText.contains("Vanta") == false)
+        #expect(ranked.first?.cleanText.contains("product gets simpler") == true)
+    }
+
+    @Test("Intro sections are penalized below specific later moments")
+    func introSectionsArePenalizedBelowSpecificLaterMoments() {
+        let blocks = [
+            block(1, 0, "Welcome back. Everyone says different things about this topic and it is a difficult question today.", chapterIndex: 0),
+            block(2, 10, "I wanted to start with the basic definition before we get to the examples and decisions.", chapterIndex: 0),
+            block(3, 100, "The key result is that the new workflow cuts review time by 35 percent because the model checks every pull request.", chapterIndex: 1),
+            block(4, 110, "This means the team can find mistakes before merge instead of waiting for a production incident.", chapterIndex: 1),
+            block(5, 120, "Compared to the old process, the same review took 12 minutes instead of 40 minutes in the demo.", chapterIndex: 1),
+        ]
+        let chapters = [
+            VideoChapter(title: "Intro", startTime: 0, endTime: 80, estimatedTokens: nil),
+            VideoChapter(title: "Review benchmark", startTime: 80, endTime: 150, estimatedTokens: nil),
+        ]
+        let result = SenseResult(
+            url: "https://example.com/video",
+            title: "Review benchmark",
+            transcriptSource: .manual,
+            transcriptBlocks: blocks,
+            estimatedTokens: blocks.map(\.estimatedTokens).reduce(0, +),
+            chapters: chapters
+        )
+
+        let ranked = MomentRanker.rankedMoments(for: result, limit: 1)
+
+        #expect(ranked.first?.chapterTitle == "Review benchmark")
+        #expect(ranked.first?.cleanText.contains("35 percent") == true)
+    }
+
+    @Test("Leading fragments are penalized below self-contained starts")
+    func leadingFragmentsArePenalizedBelowSelfContainedStarts() {
+        let blocks = [
+            block(1, 0, "to be 40 percent cheaper than the baseline because the model reuses cached context.", chapterIndex: 0),
+            block(2, 10, "This means teams can run the same automation more often without increasing spend.", chapterIndex: 0),
+            block(3, 100, "The key result is that the model is 40 percent cheaper because it reuses cached context.", chapterIndex: 1),
+            block(4, 110, "This means teams can run the same automation more often without increasing spend.", chapterIndex: 1),
+        ]
+        let chapters = [
+            VideoChapter(title: "Fragmented cost note", startTime: 0, endTime: 80, estimatedTokens: nil),
+            VideoChapter(title: "Self-contained cost result", startTime: 80, endTime: 140, estimatedTokens: nil),
+        ]
+        let result = SenseResult(
+            url: "https://example.com/video",
+            title: "Cost result",
+            transcriptSource: .manual,
+            transcriptBlocks: blocks,
+            estimatedTokens: blocks.map(\.estimatedTokens).reduce(0, +),
+            chapters: chapters
+        )
+
+        let ranked = MomentRanker.rankedMoments(for: result, limit: 1)
+
+        #expect(ranked.first?.chapterTitle == "Self-contained cost result")
+        #expect(ranked.first?.cleanText.hasPrefix("The key result") == true)
+    }
+
     @Test("Diversity penalizes repeated chapter picks")
     func diversityPenalizesRepeatedChapterPicks() {
         let blocks = [
