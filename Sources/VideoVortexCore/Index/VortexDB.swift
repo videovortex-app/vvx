@@ -532,7 +532,7 @@ public actor VortexDB {
             sqlite3_bind_text(stmt, 16, chaptersJSON,    -1, SQLITE_TRANSIENT)
 
             guard sqlite3_step(stmt) == SQLITE_DONE else {
-                throw VortexDBError.execFailed(String(cString: sqlite3_errmsg(stmt)))
+                throw VortexDBError.execFailed(String(cString: sqlite3_errmsg(db)))
             }
         }
     }
@@ -561,7 +561,7 @@ public actor VortexDB {
             try dbPrepare(db, "DELETE FROM transcript_blocks WHERE video_id = ?;") { stmt throws -> Void in
                 sqlite3_bind_text(stmt, 1, videoId, -1, SQLITE_TRANSIENT)
                 guard sqlite3_step(stmt) == SQLITE_DONE else {
-                    throw VortexDBError.execFailed(String(cString: sqlite3_errmsg(stmt)))
+                    throw VortexDBError.execFailed(String(cString: sqlite3_errmsg(db)))
                 }
             }
 
@@ -586,7 +586,7 @@ public actor VortexDB {
                     sqlite3_bind_text(stmt, 9, block.text,                 -1, SQLITE_TRANSIENT)
 
                     guard sqlite3_step(stmt) == SQLITE_DONE else {
-                        throw VortexDBError.execFailed(String(cString: sqlite3_errmsg(stmt)))
+                        throw VortexDBError.execFailed(String(cString: sqlite3_errmsg(db)))
                     }
                 }
             }
