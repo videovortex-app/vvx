@@ -74,6 +74,98 @@ struct MomentRankerTests {
         #expect(overlap == 0)
     }
 
+    @Test("Anchor-first ranking exposes payoff sentence debug fields")
+    func anchorFirstRankingExposesPayoffDebugFields() {
+        let blocks = [
+            block(1, 0, 6, "First click install and then open the setup screen for the demo.", chapterIndex: 0),
+            block(2, 6, 12, "Next download the starter files and step through each config option.", chapterIndex: 0),
+            block(3, 30, 38, "The useful context is that teams were waiting seven days for release review.", chapterIndex: 1),
+            block(4, 38, 46, "This means the release loop drops from 7 days to 2 hours because the model catches mistakes before humans review them.", chapterIndex: 1),
+            block(5, 46, 54, "Instead of adding more process, the team ships small changes with the same safety.", chapterIndex: 1),
+        ]
+        let chapters = [
+            VideoChapter(title: "Setup", startTime: 0, endTime: 20, estimatedTokens: nil),
+            VideoChapter(title: "Release loop benchmark", startTime: 20, endTime: 70, estimatedTokens: nil),
+        ]
+        let result = SenseResult(
+            url: "https://example.com/video",
+            title: "Release loop benchmark",
+            transcriptSource: .manual,
+            transcriptBlocks: blocks,
+            estimatedTokens: blocks.map(\.estimatedTokens).reduce(0, +),
+            chapters: chapters
+        )
+
+        let ranking = MomentRanker.rank(
+            result: result,
+            config: MomentRankerConfig(
+                limit: 1,
+                includeCandidates: true,
+                minDurationSeconds: 6,
+                targetDurationSeconds: 18,
+                maxDurationSeconds: 28,
+                qualityThreshold: 0
+            )
+        )
+
+        let first = ranking.rankedMoments.first
+        #expect(first?.cleanText.contains("7 days to 2 hours") == true)
+        #expect(first?.cleanText.contains("click install") == false)
+        #expect(first?.centerSentence?.contains("7 days to 2 hours") == true)
+        #expect((first?.anchorScore ?? 0) > 20)
+        #expect((first?.anchorBreakdown?.consequence ?? 0) > 0)
+        #expect((first?.anchorBreakdown?.concrete ?? 0) > 0)
+        #expect(ranking.momentCandidates?.first?.centerSentence != nil)
+    }
+
+    @Test("V7 gates reject question anchors and unaligned numbers")
+    func v7GatesRejectQuestionAnchorsAndUnalignedNumbers() {
+        let blocks = [
+            block(1, 0, 8, "What are the biggest bottlenecks when you look today?", chapterIndex: 0),
+            block(2, 8, 16, "How do they go from like how do they make a similar thing?", chapterIndex: 0),
+            block(3, 40, 48, "I heard in Tennessee that they make them at 11 percent alcohol but in Ohio we can only get 7 percent.", chapterIndex: 1),
+            block(4, 80, 88, "This means DeepSeek is 40x cheaper because cached tokens reduce the cost of running parallel coding agents.", chapterIndex: 2),
+            block(5, 88, 96, "Instead of spending dollars on each run, the workflow costs pennies and lets teams test more ideas.", chapterIndex: 2),
+        ]
+        let chapters = [
+            VideoChapter(title: "Interview setup", startTime: 0, endTime: 30, estimatedTokens: nil),
+            VideoChapter(title: "Anecdote", startTime: 30, endTime: 70, estimatedTokens: nil),
+            VideoChapter(title: "Pricing: 40x Cheaper", startTime: 70, endTime: 110, estimatedTokens: nil),
+        ]
+        let result = SenseResult(
+            url: "https://example.com/video",
+            title: "DeepSeek pricing cost analysis",
+            transcriptSource: .manual,
+            transcriptBlocks: blocks,
+            estimatedTokens: blocks.map(\.estimatedTokens).reduce(0, +),
+            chapters: chapters
+        )
+
+        let ranking = MomentRanker.rank(
+            result: result,
+            config: MomentRankerConfig(
+                limit: 4,
+                includeCandidates: true,
+                minDurationSeconds: 6,
+                targetDurationSeconds: 18,
+                maxDurationSeconds: 28
+            )
+        )
+
+        #expect(ranking.rankedMoments.count == 1)
+        let first = ranking.rankedMoments.first
+        #expect(first?.cleanText.contains("40x cheaper") == true)
+        #expect(first?.cleanText.contains("11 percent alcohol") == false)
+        #expect(first?.centerSentence?.hasSuffix("?") == false)
+        #expect(first?.numberIsTopicAligned == true)
+        #expect(first?.hasConsequenceNearby == true)
+        #expect(first?.productWorthinessSignals?.contains("topic_aligned_number") == true)
+
+        let rejectionReasons = Set(ranking.rejectedAnchors?.map(\.rejectionReason) ?? [])
+        #expect(rejectionReasons.contains("question_anchor"))
+        #expect(rejectionReasons.contains("anchor_score_below_threshold") || rejectionReasons.contains("no_topic_or_consequence"))
+    }
+
     @Test("Empty transcript returns no moments")
     func emptyTranscriptReturnsNoMoments() {
         let result = SenseResult(url: "https://example.com/video", title: "No transcript")
@@ -270,7 +362,7 @@ struct MomentRankerTests {
         #expect(ranked.first?.cleanText.hasPrefix("The key result") == true)
     }
 
-    @Test("Overlapping caption lead-ins are expanded into the moment")
+    @Test("Overlapping caption lead-ins snap to the payoff")
     func overlappingCaptionLeadInsAreExpanded() {
         let blocks = [
             block(1, 0, 2, "Welcome back. We are going to look at model benchmarks today.", chapterIndex: 0),
@@ -304,8 +396,9 @@ struct MomentRankerTests {
             )
         )
 
-        #expect(ranking.rankedMoments.first?.startSeconds == 17)
-        #expect(ranking.rankedMoments.first?.cleanText.hasPrefix("what you need to realize") == true)
+        #expect(ranking.rankedMoments.first?.startSeconds == 20)
+        #expect(ranking.rankedMoments.first?.cleanText.hasPrefix("Deepseek V4 Pro") == true)
+        #expect(ranking.rankedMoments.first?.cleanText.contains("40 percent cheaper") == true)
     }
 
     @Test("Incomplete caption endings are extended")
@@ -376,8 +469,94 @@ struct MomentRankerTests {
             )
         )
 
-        #expect(ranking.rankedMoments.first?.startSeconds == 0)
-        #expect(ranking.rankedMoments.first?.cleanText.contains("the most interesting part is the hardware") == true)
+        #expect(ranking.rankedMoments.first?.startSeconds == 2)
+        #expect(ranking.rankedMoments.first?.cleanText.hasPrefix("If you think about it") == true)
+        #expect(ranking.rankedMoments.first?.cleanText.contains("40 percent cheaper") == true)
+    }
+
+    @Test("Broad regions compress around the payoff")
+    func broadRegionsCompressAroundPayoff() {
+        let blocks = [
+            block(1, 0, 10, "Welcome back. We are going to slowly set up the context for this example.", chapterIndex: 0),
+            block(2, 10, 20, "The background is useful but it is not yet the actual moment worth showing.", chapterIndex: 0),
+            block(3, 20, 30, "The key result is that the workflow is 42 percent cheaper because cached transcript reads avoid network calls.", chapterIndex: 0),
+            block(4, 30, 40, "This means the same automation can run every hour instead of once a day without increasing spend.", chapterIndex: 0),
+            block(5, 40, 50, "Compared to the old process, the team gets fresher context and lower cost at the same time.", chapterIndex: 0),
+            block(6, 50, 60, "After that there are some implementation details that are useful but less important.", chapterIndex: 0),
+            block(7, 60, 70, "Why? It's not because we", chapterIndex: 0),
+        ]
+        let chapters = [
+            VideoChapter(title: "Cost result", startTime: 0, endTime: 80, estimatedTokens: nil),
+        ]
+        let result = SenseResult(
+            url: "https://example.com/video",
+            title: "Cost result",
+            transcriptSource: .manual,
+            transcriptBlocks: blocks,
+            estimatedTokens: blocks.map(\.estimatedTokens).reduce(0, +),
+            chapters: chapters
+        )
+
+        let ranked = MomentRanker.rankedMoments(for: result, limit: 1)
+
+        #expect(ranked.first?.durationSeconds ?? 99 <= 56)
+        #expect(ranked.first?.cleanText.contains("Welcome back") == false)
+        #expect(ranked.first?.cleanText.contains("42 percent cheaper") == true)
+        #expect(ranked.first?.cleanText.contains("Why? It's not because we") == false)
+    }
+
+    @Test("Speaker markers and repeated words are scrubbed")
+    func speakerMarkersAndRepeatedWordsAreScrubbed() {
+        let blocks = [
+            block(1, 0, 10, ">> The key result is that I I can cut review time by 35 percent because the model checks every pull request.", chapterIndex: 0),
+            block(2, 10, 20, "This means the team can find mistakes before merge instead of waiting for production.", chapterIndex: 0),
+            block(3, 20, 30, "Compared to the old process, the same review takes 12 minutes instead of 40 minutes.", chapterIndex: 0),
+        ]
+        let chapters = [
+            VideoChapter(title: "Review benchmark", startTime: 0, endTime: 40, estimatedTokens: nil),
+        ]
+        let result = SenseResult(
+            url: "https://example.com/video",
+            title: "Review benchmark",
+            transcriptSource: .manual,
+            transcriptBlocks: blocks,
+            estimatedTokens: blocks.map(\.estimatedTokens).reduce(0, +),
+            chapters: chapters
+        )
+
+        let ranked = MomentRanker.rankedMoments(for: result, limit: 1)
+
+        #expect(ranked.first?.cleanText.contains(">>") == false)
+        #expect(ranked.first?.cleanText.contains("I I") == false)
+        #expect(ranked.first?.cleanText.contains("I can cut review time") == true)
+    }
+
+    @Test("Leading false starts and dangling trailing fragments are scrubbed")
+    func leadingFalseStartsAndDanglingTrailingFragmentsAreScrubbed() {
+        let blocks = [
+            block(1, 0, 10, "we I mean you've probably seen the news that AI tools now find multi chain exploits faster than teams expect", chapterIndex: 0),
+            block(2, 10, 20, "this means security work has to move from annual audits to continuous review because the attack surface changes every day", chapterIndex: 0),
+            block(3, 20, 30, "compared to the old process the same team can catch 30 percent more issues before release", chapterIndex: 0),
+            block(4, 30, 40, "and I think we've basically helped put together all the talent from", chapterIndex: 0),
+        ]
+        let chapters = [
+            VideoChapter(title: "Security shift", startTime: 0, endTime: 50, estimatedTokens: nil),
+        ]
+        let result = SenseResult(
+            url: "https://example.com/video",
+            title: "Security shift",
+            transcriptSource: .manual,
+            transcriptBlocks: blocks,
+            estimatedTokens: blocks.map(\.estimatedTokens).reduce(0, +),
+            chapters: chapters
+        )
+
+        let ranked = MomentRanker.rankedMoments(for: result, limit: 1)
+        let text = ranked.first?.cleanText ?? ""
+
+        #expect(text.hasPrefix("You've probably seen") == true)
+        #expect(text.contains("and I think") == false)
+        #expect(text.hasSuffix("from") == false)
     }
 
     @Test("Diversity penalizes repeated chapter picks")

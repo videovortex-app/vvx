@@ -221,7 +221,14 @@ private extension DocsCommand {
                 "qualityPenalty": -2,
                 "mmrDiversity": 14
               },
-              "whySelected": ["contains insight language", "distinct from other selected moments"]
+              "whySelected": ["contains insight language", "distinct from other selected moments"],
+              "centerSentence": "This means the release loop drops from 7 days to 2 hours.",
+              "anchorScore": 42,
+              "topicAlignment": 8,
+              "chapterSpecificity": 1.15,
+              "numberIsTopicAligned": true,
+              "hasConsequenceNearby": true,
+              "productWorthinessSignals": ["consequence", "topic_aligned_number"]
             }
           ],
           "transcriptPath": "/Users/you/.vvx/transcripts/YouTube/Channel/Title.en.srt",
@@ -244,9 +251,9 @@ private extension DocsCommand {
         vvx moments --from-sense result.json --limit 10 --explain
         ```
 
-        `--explain` includes pre-diversity `momentCandidates`. Do not model best
-        moments as `search`, `gather`, or `clip`; the primitive is
-        `transcript -> ranked moments`.
+        `--explain` includes pre-diversity `momentCandidates` and V7
+        `rejectedAnchors` for gate debugging. Do not model best moments as
+        `search`, `gather`, or `clip`; the primitive is `transcript -> ranked moments`.
 
         ### `--metadata-only` mode
         `transcriptBlocks` is empty but `estimatedTokens` and all chapter token counts are
@@ -301,7 +308,7 @@ private extension DocsCommand {
         ```
 
         Output includes `rankedMoments`. With `--explain`, output also includes
-        pre-diversity `momentCandidates` for score debugging.
+        pre-diversity `momentCandidates` and `rejectedAnchors` for gate debugging.
 
         This is not search, gather, or clip extraction. It maps one transcript to
         ranked moments.
@@ -1484,6 +1491,40 @@ private extension DocsCommand {
                 "mmrDiversity":   { "type": "integer" }
               }
             },
+            "MomentAnchorBreakdown": {
+              "type": "object",
+              "properties": {
+                "consequence":    { "type": "integer" },
+                "contrast":       { "type": "integer" },
+                "decision":       { "type": "integer" },
+                "concrete":       { "type": "integer" },
+                "novelty":        { "type": "integer" },
+                "outcome":        { "type": "integer" },
+                "topic":          { "type": "integer" },
+                "processPenalty": { "type": "integer" },
+                "qualityPenalty": { "type": "integer" }
+              }
+            },
+            "RejectedMomentAnchor": {
+              "type": "object",
+              "properties": {
+                "id":                     { "type": "string" },
+                "startSeconds":           { "type": "number" },
+                "endSeconds":             { "type": "number" },
+                "centerSentence":         { "type": "string" },
+                "chapterTitle":           { "type": ["string", "null"] },
+                "chapterIndex":           { "type": ["integer", "null"] },
+                "anchorScore":            { "type": "integer" },
+                "anchorBreakdown":        { "$ref": "#/definitions/MomentAnchorBreakdown" },
+                "topicAlignment":         { "type": "integer" },
+                "chapterSpecificity":     { "type": "number" },
+                "numberIsTopicAligned":   { "type": "boolean" },
+                "hasConsequenceNearby":   { "type": "boolean" },
+                "anchorRejected":         { "type": "boolean" },
+                "rejectionReason":        { "type": "string" },
+                "productWorthinessSignals": { "type": "array", "items": { "type": "string" } }
+              }
+            },
             "RankedMoment": {
               "type": "object",
               "required": ["id", "rank", "startSeconds", "endSeconds", "durationSeconds", "titleHint", "cleanText", "score", "candidateType", "confidence", "scoreBreakdown", "whySelected"],
@@ -1501,7 +1542,17 @@ private extension DocsCommand {
                 "chapterTitle":   { "type": ["string", "null"] },
                 "chapterIndex":   { "type": ["integer", "null"] },
                 "scoreBreakdown": { "$ref": "#/definitions/MomentScoreBreakdown" },
-                "whySelected":    { "type": "array", "items": { "type": "string" } }
+                "whySelected":    { "type": "array", "items": { "type": "string" } },
+                "centerSentence": { "type": ["string", "null"], "description": "Anchor sentence the moment was expanded around." },
+                "anchorScore":    { "type": ["integer", "null"], "description": "Raw local impact score for centerSentence." },
+                "anchorBreakdown": { "anyOf": [{ "$ref": "#/definitions/MomentAnchorBreakdown" }, { "type": "null" }] },
+                "topicAlignment": { "type": ["integer", "null"] },
+                "chapterSpecificity": { "type": ["number", "null"] },
+                "numberIsTopicAligned": { "type": ["boolean", "null"] },
+                "hasConsequenceNearby": { "type": ["boolean", "null"] },
+                "anchorRejected": { "type": ["boolean", "null"] },
+                "rejectionReason": { "type": ["string", "null"] },
+                "productWorthinessSignals": { "type": ["array", "null"], "items": { "type": "string" } }
               }
             },
             "SenseResult": {

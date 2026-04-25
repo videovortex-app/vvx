@@ -19,6 +19,16 @@ public struct RankedMoment: Codable, Sendable, Equatable {
     public let chapterIndex: Int?
     public let scoreBreakdown: MomentScoreBreakdown
     public let whySelected: [String]
+    public let centerSentence: String?
+    public let anchorScore: Int?
+    public let anchorBreakdown: MomentAnchorBreakdown?
+    public let topicAlignment: Int?
+    public let chapterSpecificity: Double?
+    public let numberIsTopicAligned: Bool?
+    public let hasConsequenceNearby: Bool?
+    public let anchorRejected: Bool?
+    public let rejectionReason: String?
+    public let productWorthinessSignals: [String]?
 
     public init(
         id: String,
@@ -34,7 +44,17 @@ public struct RankedMoment: Codable, Sendable, Equatable {
         chapterTitle: String?,
         chapterIndex: Int?,
         scoreBreakdown: MomentScoreBreakdown,
-        whySelected: [String]
+        whySelected: [String],
+        centerSentence: String? = nil,
+        anchorScore: Int? = nil,
+        anchorBreakdown: MomentAnchorBreakdown? = nil,
+        topicAlignment: Int? = nil,
+        chapterSpecificity: Double? = nil,
+        numberIsTopicAligned: Bool? = nil,
+        hasConsequenceNearby: Bool? = nil,
+        anchorRejected: Bool? = nil,
+        rejectionReason: String? = nil,
+        productWorthinessSignals: [String]? = nil
     ) {
         self.id             = id
         self.rank           = rank
@@ -50,6 +70,16 @@ public struct RankedMoment: Codable, Sendable, Equatable {
         self.chapterIndex   = chapterIndex
         self.scoreBreakdown = scoreBreakdown
         self.whySelected    = whySelected
+        self.centerSentence = centerSentence
+        self.anchorScore = anchorScore
+        self.anchorBreakdown = anchorBreakdown
+        self.topicAlignment = topicAlignment
+        self.chapterSpecificity = chapterSpecificity
+        self.numberIsTopicAligned = numberIsTopicAligned
+        self.hasConsequenceNearby = hasConsequenceNearby
+        self.anchorRejected = anchorRejected
+        self.rejectionReason = rejectionReason
+        self.productWorthinessSignals = productWorthinessSignals
     }
 }
 
@@ -105,6 +135,96 @@ public struct MomentScoreBreakdown: Codable, Sendable, Equatable {
     }
 }
 
+public struct MomentAnchorBreakdown: Codable, Sendable, Equatable {
+    public let consequence: Int
+    public let contrast: Int
+    public let decision: Int
+    public let concrete: Int
+    public let novelty: Int
+    public let outcome: Int
+    public let topic: Int
+    public let processPenalty: Int
+    public let qualityPenalty: Int
+
+    public init(
+        consequence: Int,
+        contrast: Int,
+        decision: Int,
+        concrete: Int,
+        novelty: Int,
+        outcome: Int,
+        topic: Int,
+        processPenalty: Int,
+        qualityPenalty: Int
+    ) {
+        self.consequence = consequence
+        self.contrast = contrast
+        self.decision = decision
+        self.concrete = concrete
+        self.novelty = novelty
+        self.outcome = outcome
+        self.topic = topic
+        self.processPenalty = processPenalty
+        self.qualityPenalty = qualityPenalty
+    }
+
+    public var score: Int {
+        consequence + contrast + decision + concrete + novelty + outcome + topic + processPenalty + qualityPenalty
+    }
+}
+
+public struct RejectedMomentAnchor: Codable, Sendable, Equatable {
+    public let id: String
+    public let startSeconds: Double
+    public let endSeconds: Double
+    public let centerSentence: String
+    public let chapterTitle: String?
+    public let chapterIndex: Int?
+    public let anchorScore: Int
+    public let anchorBreakdown: MomentAnchorBreakdown
+    public let topicAlignment: Int
+    public let chapterSpecificity: Double
+    public let numberIsTopicAligned: Bool
+    public let hasConsequenceNearby: Bool
+    public let anchorRejected: Bool
+    public let rejectionReason: String
+    public let productWorthinessSignals: [String]
+
+    public init(
+        id: String,
+        startSeconds: Double,
+        endSeconds: Double,
+        centerSentence: String,
+        chapterTitle: String?,
+        chapterIndex: Int?,
+        anchorScore: Int,
+        anchorBreakdown: MomentAnchorBreakdown,
+        topicAlignment: Int,
+        chapterSpecificity: Double,
+        numberIsTopicAligned: Bool,
+        hasConsequenceNearby: Bool,
+        anchorRejected: Bool = true,
+        rejectionReason: String,
+        productWorthinessSignals: [String]
+    ) {
+        self.id = id
+        self.startSeconds = startSeconds
+        self.endSeconds = endSeconds
+        self.centerSentence = centerSentence
+        self.chapterTitle = chapterTitle
+        self.chapterIndex = chapterIndex
+        self.anchorScore = anchorScore
+        self.anchorBreakdown = anchorBreakdown
+        self.topicAlignment = topicAlignment
+        self.chapterSpecificity = chapterSpecificity
+        self.numberIsTopicAligned = numberIsTopicAligned
+        self.hasConsequenceNearby = hasConsequenceNearby
+        self.anchorRejected = anchorRejected
+        self.rejectionReason = rejectionReason
+        self.productWorthinessSignals = productWorthinessSignals
+    }
+}
+
 /// Output shape for the dev/eval `vvx moments` command.
 public struct MomentRankingResult: Codable, Sendable, Equatable {
     public let schemaVersion: String
@@ -113,13 +233,15 @@ public struct MomentRankingResult: Codable, Sendable, Equatable {
     public let sourceURL: String
     public let rankedMoments: [RankedMoment]
     public let momentCandidates: [RankedMoment]?
+    public let rejectedAnchors: [RejectedMomentAnchor]?
 
     public init(
         schemaVersion: String = "1.0",
         sourceTitle: String,
         sourceURL: String,
         rankedMoments: [RankedMoment],
-        momentCandidates: [RankedMoment]? = nil
+        momentCandidates: [RankedMoment]? = nil,
+        rejectedAnchors: [RejectedMomentAnchor]? = nil
     ) {
         self.schemaVersion   = schemaVersion
         self.success         = true
@@ -127,6 +249,7 @@ public struct MomentRankingResult: Codable, Sendable, Equatable {
         self.sourceURL       = sourceURL
         self.rankedMoments   = rankedMoments
         self.momentCandidates = momentCandidates
+        self.rejectedAnchors = rejectedAnchors
     }
 
     public func jsonString() -> String {
