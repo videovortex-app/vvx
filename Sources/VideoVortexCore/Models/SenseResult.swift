@@ -99,6 +99,13 @@ public struct SenseResult: Codable, Sendable {
     /// Each chapter carries `endTime` and `estimatedTokens` for context-window planning.
     public let chapters: [VideoChapter]
 
+    /// Ranked local "aha moment" candidates.
+    ///
+    /// Present only when the caller asks for moments (`vvx sense --moments` or MCP
+    /// `sense` with `moments: true`). Omitted otherwise to preserve the default
+    /// SenseResult payload size.
+    public let rankedMoments: [RankedMoment]?
+
     /// ISO 8601 timestamp of when the sense operation completed.
     public let completedAt: Date
 
@@ -137,6 +144,7 @@ public struct SenseResult: Codable, Sendable {
         transcriptBlocks: [TranscriptBlock] = [],
         estimatedTokens: Int? = nil,
         chapters: [VideoChapter] = [],
+        rankedMoments: [RankedMoment]? = nil,
         completedAt: Date = .now,
         sliced: Bool = false,
         sliceStart: Double? = nil,
@@ -162,6 +170,7 @@ public struct SenseResult: Codable, Sendable {
         self.transcriptBlocks     = transcriptBlocks
         self.estimatedTokens      = estimatedTokens
         self.chapters             = chapters
+        self.rankedMoments        = rankedMoments
         self.completedAt          = completedAt
         self.sliced               = sliced
         self.sliceStart           = sliceStart
@@ -201,6 +210,7 @@ extension SenseResult {
             transcriptBlocks:     [],              // stripped
             estimatedTokens:      estimatedTokens, // preserved (slice-local or full-transcript total)
             chapters:             chapters,         // preserved (endTime + slice-local estimatedTokens intact)
+            rankedMoments:        rankedMoments,
             completedAt:          completedAt,
             sliced:               sliced,           // propagated from sliced() if applicable
             sliceStart:           sliceStart,
@@ -293,10 +303,49 @@ extension SenseResult {
             transcriptBlocks:     survivingBlocks,
             estimatedTokens:      newTokens,
             chapters:             newChapters,
+            rankedMoments:        nil,
             completedAt:          completedAt,
             sliced:               true,
             sliceStart:           startSeconds,
             sliceEnd:             jsonSliceEnd
+        )
+    }
+}
+
+// MARK: - Ranked moments variant
+
+extension SenseResult {
+
+    /// Returns a copy with ranked moments attached.
+    ///
+    /// Ranking is output-only state, similar to slicing/metadata-only shaping. The
+    /// database should continue indexing the unranked full transcript result.
+    public func withRankedMoments(_ moments: [RankedMoment]?) -> SenseResult {
+        SenseResult(
+            schemaVersion:        schemaVersion,
+            url:                  url,
+            title:                title,
+            platform:             platform,
+            uploader:             uploader,
+            durationSeconds:      durationSeconds,
+            uploadDate:           uploadDate,
+            description:          description,
+            descriptionTruncated: descriptionTruncated,
+            tags:                 tags,
+            viewCount:            viewCount,
+            likeCount:            likeCount,
+            commentCount:         commentCount,
+            transcriptPath:       transcriptPath,
+            transcriptLanguage:   transcriptLanguage,
+            transcriptSource:     transcriptSource,
+            transcriptBlocks:     transcriptBlocks,
+            estimatedTokens:      estimatedTokens,
+            chapters:             chapters,
+            rankedMoments:        moments,
+            completedAt:          completedAt,
+            sliced:               sliced,
+            sliceStart:           sliceStart,
+            sliceEnd:             sliceEnd
         )
     }
 }

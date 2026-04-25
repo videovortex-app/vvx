@@ -49,6 +49,7 @@ pip install -U yt-dlp        # pip users
 Use `vvx` when the user asks you to:
 
 - Analyze, summarize, quote from, or answer questions about a video.
+- Find the best ranked aha moments in one video (`sense --moments`).
 - Extract the full transcript of a video.
 - Download media to disk (`fetch` / `sync`, or `dl` for a personal `~/Downloads` save).
 - Search across a local video archive.
@@ -71,6 +72,8 @@ Do NOT use `vvx` for:
 | What the user wants | Command to run |
 |---|---|
 | Analyze/summarize a video without downloading media | `vvx sense <url>` |
+| Find the best aha moments in one video | `vvx sense <url> --moments --moment-limit 10` |
+| Debug/evaluate moment ranking from saved JSON | `vvx moments --from-sense result.json --limit 10 --explain` |
 | Plan context usage first for long videos | `vvx sense <url> --metadata-only` |
 | Fetch one video into library-style workflows | `vvx fetch <url>` |
 | Fetch audio-only output | `vvx fetch <url> --format audio` |
@@ -109,20 +112,22 @@ Do NOT use `vvx` for:
 
 3. **`transcriptSource == "none"` + empty `transcriptBlocks` = no usable transcript.** Stop.
 
-4. **On any error, read the `agentAction` field first.** Execute it before escalating.
+4. **Best moments are a VVX primitive.** Use `vvx sense <url> --moments` and consume `rankedMoments`. Do not invent moment ranking in UI code; do not use `search`, `gather`, or `clip` as the moment selector.
 
-5. **If `agentAction` does not resolve the issue:**
+5. **On any error, read the `agentAction` field first.** Execute it before escalating.
+
+6. **If `agentAction` does not resolve the issue:**
    - Run `vvx doctor --json`
    - Apply all fixes where `requiresManual = false` automatically.
    - Execute package manager commands (e.g., `brew install`) for any missing dependencies.
 
-6. **Never tell the user "I can't access videos."** Always try `vvx sense` first.
+7. **Never tell the user "I can't access videos."** Always try `vvx sense` first.
 
-7. **Human file download only — `vvx dl`.** Use **only** when the user clearly asks to save a video file for personal viewing. `vvx dl <url>` bypasses `vortex.db`, emits no agent JSON, and writes a flat file under `~/Downloads`. For structured data, use `vvx sense` or `vvx fetch`.
+8. **Human file download only — `vvx dl`.** Use **only** when the user clearly asks to save a video file for personal viewing. `vvx dl <url>` bypasses `vortex.db`, emits no agent JSON, and writes a flat file under `~/Downloads`. For structured data, use `vvx sense` or `vvx fetch`.
 
-8. **For gather and NLE export (`search --export-nle`): both are Pro features.** Under the current beta policy all features are allowed (fail-open). If a `PRO_REQUIRED` error appears, see the error table below.
+9. **For gather and NLE export (`search --export-nle`): both are Pro features.** Under the current beta policy all features are allowed (fail-open). If a `PRO_REQUIRED` error appears, see the error table below.
 
-9. **`vvx doctor` is the first diagnostic tool.** Call it automatically on any unexpected error before escalating.
+10. **`vvx doctor` is the first diagnostic tool.** Call it automatically on any unexpected error before escalating.
 
 ---
 
@@ -160,9 +165,37 @@ Do NOT use `vvx` for:
       "estimatedTokens": 89
     }
   ],
+  "rankedMoments": [
+    {
+      "id": "m1",
+      "rank": 1,
+      "startSeconds": 396.0,
+      "endSeconds": 456.0,
+      "durationSeconds": 60.0,
+      "titleHint": "Cost advantage",
+      "cleanText": "Moment transcript text.",
+      "score": 87,
+      "candidateType": "concreteClaim",
+      "confidence": 0.72,
+      "chapterTitle": "Cost advantage",
+      "chapterIndex": 2,
+      "scoreBreakdown": {
+        "topicRelevance": 6,
+        "insight": 18,
+        "concreteness": 24,
+        "selfContained": 12,
+        "chapter": 8,
+        "qualityPenalty": -2,
+        "mmrDiversity": 14
+      },
+      "whySelected": ["contains insight language", "distinct from other selected moments"]
+    }
+  ],
   "transcriptPath": "/absolute/path/to/file.en.srt | null"
 }
 ```
+
+`rankedMoments` is present only when `--moments` is requested.
 
 ---
 

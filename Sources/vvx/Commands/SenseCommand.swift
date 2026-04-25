@@ -20,6 +20,7 @@ struct SenseCommand: AsyncParsableCommand {
           vvx sense "https://tiktok.com/@user/video/123" --markdown
           vvx sense "https://youtube.com/watch?v=..." --browser safari
           vvx sense "https://youtube.com/watch?v=..." --no-sponsors
+          vvx sense "https://youtube.com/watch?v=..." --moments --moment-limit 10
         """
     )
 
@@ -52,6 +53,12 @@ struct SenseCommand: AsyncParsableCommand {
 
     @Flag(name: .long, help: "Return metadata and token counts only — omits transcriptBlocks from the JSON output. estimatedTokens and chapter token counts are still populated for context-window planning. Useful for very long videos: peek first, then use --start/--end for specific sections.")
     var metadataOnly: Bool = false
+
+    @Flag(name: .long, help: "Attach local rankedMoments to JSON output. Moments are selected from transcript windows by VVX core; ClawWidget should render these, not rank them.")
+    var moments: Bool = false
+
+    @Option(name: .customLong("moment-limit"), help: "Maximum ranked moments to return with --moments. Default: 4.")
+    var momentLimit: Int = 4
 
     @Option(name: .long, help: "Start of transcript slice. Accepts HH:MM:SS, MM:SS, or decimal seconds. Defaults to 0 when omitted. The full transcript is always indexed; only stdout is sliced.")
     var start: String?
@@ -93,6 +100,14 @@ struct SenseCommand: AsyncParsableCommand {
         if parsedStart >= parsedEnd {
             let err = VvxError(code: .invalidTimeRange,
                                message: "Invalid time range: --start (\(parsedStart)s) must be strictly less than --end (\(parsedEnd)s).",
+                               url: url)
+            printError(err)
+            throw ExitCode(VvxExitCode.forErrorCode(err.code))
+        }
+
+        if momentLimit <= 0 {
+            let err = VvxError(code: .parseError,
+                               message: "--moment-limit must be > 0.",
                                url: url)
             printError(err)
             throw ExitCode(VvxExitCode.forErrorCode(err.code))
@@ -145,9 +160,14 @@ struct SenseCommand: AsyncParsableCommand {
                                              transcriptPath: result.transcriptPath)
 
                 // Apply slice to the stdout payload (DB is already written with full data).
-                let outputResult = isSlicing
+                var outputResult = isSlicing
                     ? result.sliced(startSeconds: parsedStart, endSeconds: parsedEnd)
                     : result
+
+                if moments && !transcript && !markdown {
+                    let ranked = MomentRanker.rankedMoments(for: outputResult, limit: momentLimit)
+                    outputResult = outputResult.withRankedMoments(ranked)
+                }
 
                 if transcript {
                     // --transcript outputs raw text; slicing applies via transcriptBlocks.

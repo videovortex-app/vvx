@@ -70,6 +70,8 @@ final class McpToolRegistry: Sendable {
         Returns schemaVersion 3.0 JSON with: title, uploader, duration, tags, chapter outline \
         (with endTime and estimatedTokens per chapter), transcriptSource, estimatedTokens, \
         and inline transcriptBlocks (timestamped, cleaned, with chapterIndex). \
+        Set moments=true to attach VVX-ranked aha moments as rankedMoments; ClawWidget \
+        and other clients should render these rather than ranking transcript sections themselves. \
         For short videos, transcriptBlocks gives you the full transcript in one call. \
         For long videos: set metadataOnly=true to plan context usage first, then call again \
         with start/end to retrieve specific sections. \
@@ -103,6 +105,16 @@ final class McpToolRegistry: Sendable {
                     "type": "boolean",
                     "default": false,
                     "description": "Return metadata and token counts only — strips transcriptBlocks from the response. estimatedTokens and per-chapter estimatedTokens are still populated. Use for very long videos: call with metadataOnly=true first, then sense specific sections with start/end."
+                ],
+                "moments": [
+                    "type": "boolean",
+                    "default": false,
+                    "description": "Attach rankedMoments selected locally by VVX MomentRanker. This is the product path for best moments in a single video."
+                ],
+                "momentLimit": [
+                    "type": "integer",
+                    "default": 4,
+                    "description": "Maximum ranked moments to return when moments=true."
                 ],
                 "start": [
                     "type": "string",

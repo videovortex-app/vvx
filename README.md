@@ -70,7 +70,8 @@ Use `vvx gather --help` for all flags. Use `vvx doctor` whenever any command fai
 
 | Command | Purpose |
 |--------|---------|
-| `vvx sense <url>` | Extract structured metadata + transcript JSON (no media download by default). |
+| `vvx sense <url>` | Extract structured metadata + transcript JSON (no media download by default). Use `--moments` for ranked aha moments. |
+| `vvx moments --from-sense result.json` | Dev/eval path for ranking moments from saved sense JSON. |
 | `vvx sync <url>` | Bulk ingest channel/playlist data into the local `vortex.db`. |
 | `vvx fetch <url>` | Fetch a single video and its sidecars into the vault. |
 | `vvx search "query"` | Sub-second FTS5 search — keyword, structural, proximity, chapter, or NLE export. |
@@ -84,6 +85,28 @@ Use `vvx gather --help` for all flags. Use `vvx doctor` whenever any command fai
 | `vvx docs` | Full LLM-optimized command documentation, schemas, and error reference. |
 
 *Note: `vvx <url>` with no subcommand defaults to `sense`.*
+
+### `vvx sense --moments` — ranked moments from one video
+
+Moment selection belongs in VVX core. UI clients such as ClawWidget should render
+`rankedMoments` from VVX instead of ranking transcript sections themselves.
+
+```bash
+vvx sense "https://youtube.com/watch?v=..." --moments --moment-limit 10
+```
+
+This attaches a `rankedMoments` array to the normal `SenseResult` JSON. V1 is a
+local deterministic ranker over transcript windows: insight/concreteness,
+self-containedness, quality penalties, and an MMR-style diversity pass.
+
+For debugging and offline eval, run the same ranker against a saved sense payload:
+
+```bash
+vvx moments --from-sense result.json --limit 10 --explain
+```
+
+`--explain` includes pre-diversity `momentCandidates`. This is not search,
+gather, or clip extraction; it is the primitive `transcript -> ranked moments`.
 
 ### Repository & binaries
 
@@ -281,7 +304,7 @@ Once configured, the agent discovers all tools automatically.
 
 | Tool | Purpose | Required fields |
 |------|---------|-----------------|
-| `sense` | Metadata + transcript (SenseResult v3) | `url` |
+| `sense` | Metadata + transcript (SenseResult v3), optionally `rankedMoments` | `url` |
 | `fetch` | Ingest video to archive | `url` |
 | `search` | FTS5 / structural / proximity / chapter search | `query` (optional for structural), `outputFormat` |
 | `gather` | Batch clip extraction with sidecars **(Pro)** | `query` |
@@ -294,6 +317,7 @@ Once configured, the agent discovers all tools automatically.
 | `doctor` | Diagnose environment & dependencies | — |
 
 **Agent notes:**
+- For best moments in one video, call `sense` with `moments: true`; do not use `search`, `gather`, or `clip` as the ranker.
 - `search.outputFormat` is required for keyword mode — use `"rag"` for Markdown with clip commands, or `"json"` for structured chaining.
 - Keep `sync.limit` small (5–20) to stay within MCP client timeouts.
 - `gather` returns a `GatherSummaryLine` as the final NDJSON line; read `manifestPath` from it for downstream use.
@@ -305,7 +329,7 @@ Once configured, the agent discovers all tools automatically.
 
 | Tier | Commands |
 |------|---------|
-| **Free** | `sense`, `fetch`, `sync`, `search`, `clip`, `ingest`, `library`, `sql`, `reindex`, `doctor`, `docs` |
+| **Free** | `sense`, `moments`, `fetch`, `sync`, `search`, `clip`, `ingest`, `library`, `sql`, `reindex`, `doctor`, `docs` |
 | **Pro** | `gather`, `search --export-nle` |
 
 Until billing is live, all features are accessible (beta/fail-open policy). Run `vvx doctor` to confirm your environment.

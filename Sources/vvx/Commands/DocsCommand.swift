@@ -32,7 +32,7 @@ struct DocsCommand: AsyncParsableCommand {
 
     // MARK: - Arguments & flags
 
-    @Argument(help: "Show docs for a specific command: sense, fetch, search, gather, sync, clip, ingest, library, sql, reindex, doctor, engine")
+    @Argument(help: "Show docs for a specific command: sense, moments, fetch, search, gather, sync, clip, ingest, library, sql, reindex, doctor, engine")
     var topic: String?
 
     @Flag(name: .long, help: "Print error codes and agentAction recovery table only.")
@@ -62,6 +62,7 @@ struct DocsCommand: AsyncParsableCommand {
         if let t = topic?.lowercased() {
             switch t {
             case "sense":                    print(senseSection)
+            case "moments":                  print(momentsSection)
             case "fetch":                    print(fetchSection)
             case "search":                   print(searchSection)
             case "gather":                   print(gatherSection)
@@ -76,7 +77,7 @@ struct DocsCommand: AsyncParsableCommand {
             case "errors", "error":          print(errorsSection)
             case "examples", "ex":           print(examplesSection)
             default:
-                fputs("Unknown topic '\(t)'. Valid topics: sense, fetch, search, gather, sync, clip, ingest, library, sql, reindex, doctor, engine, errors, examples\n", stderr)
+                fputs("Unknown topic '\(t)'. Valid topics: sense, moments, fetch, search, gather, sync, clip, ingest, library, sql, reindex, doctor, engine, errors, examples\n", stderr)
                 throw ExitCode.failure
             }
             return
@@ -98,6 +99,8 @@ private extension DocsCommand {
         without downloading the media file.
 
         \(senseSection)
+
+        \(momentsSection)
 
         \(fetchSection)
 
@@ -144,6 +147,7 @@ private extension DocsCommand {
         vvx sense <url> --transcript            # raw SRT text to stdout
         vvx sense <url> --markdown              # formatted Markdown document
         vvx sense <url> --metadata-only         # metadata + token budget; no transcript blocks
+        vvx sense <url> --moments --moment-limit 10  # attach ranked aha moments
         vvx sense <url> --start HH:MM:SS --end HH:MM:SS  # time-range slice
         vvx sense <url> --browser safari        # access private/age-restricted content
         vvx sense <url> --transcript-dir ~/Desktop/srts   # override transcript output location
@@ -194,10 +198,55 @@ private extension DocsCommand {
               "estimatedTokens": 890
             }
           ],
+          "rankedMoments": [
+            {
+              "id": "m1",
+              "rank": 1,
+              "startSeconds": 396.0,
+              "endSeconds": 456.0,
+              "durationSeconds": 60.0,
+              "titleHint": "Cost advantage",
+              "cleanText": "Moment transcript text.",
+              "score": 87,
+              "candidateType": "concreteClaim",
+              "confidence": 0.72,
+              "chapterTitle": "Cost advantage",
+              "chapterIndex": 2,
+              "scoreBreakdown": {
+                "topicRelevance": 6,
+                "insight": 18,
+                "concreteness": 24,
+                "selfContained": 12,
+                "chapter": 8,
+                "qualityPenalty": -2,
+                "mmrDiversity": 14
+              },
+              "whySelected": ["contains insight language", "distinct from other selected moments"]
+            }
+          ],
           "transcriptPath": "/Users/you/.vvx/transcripts/YouTube/Channel/Title.en.srt",
           "completedAt": "2026-03-24T10:30:00Z"
         }
         ```
+
+        `rankedMoments` is present only when `--moments` is requested. Moment
+        selection is a VVX core primitive: clients should render these results
+        instead of ranking transcript sections themselves.
+
+        ### Moment ranking
+        Product path:
+        ```
+        vvx sense <url> --moments --moment-limit 10
+        ```
+
+        Debug/eval path:
+        ```
+        vvx moments --from-sense result.json --limit 10 --explain
+        ```
+
+        `--explain` includes pre-diversity `momentCandidates`. Do not model best
+        moments as `search`, `gather`, or `clip`; the primitive is
+        `transcript -> ranked moments`.
 
         ### `--metadata-only` mode
         `transcriptBlocks` is empty but `estimatedTokens` and all chapter token counts are
@@ -222,8 +271,40 @@ private extension DocsCommand {
              then `--start`/`--end` for the relevant section, or `vvx search`.
         2. `transcriptBlocks` is the primary transcript interface. `transcriptPath` is an
            escape hatch for raw SRT access.
-        3. For private or age-restricted content: retry with `--browser safari`.
-        4. On error: read the `agentAction` field and execute it before escalating.
+        3. For best moments in one video, use `vvx sense --moments` and consume
+           `rankedMoments`; do not rank moments in UI code.
+        4. For private or age-restricted content: retry with `--browser safari`.
+        5. On error: read the `agentAction` field and execute it before escalating.
+        """
+    }
+}
+
+// MARK: - Section: moments
+
+private extension DocsCommand {
+    var momentsSection: String {
+        """
+        ## moments — Dev/eval ranker for saved sense JSON
+
+        `moments` runs the same VVX core MomentRanker used by `sense --moments`,
+        but from a local `SenseResult` JSON file. Use it to compare ranking changes
+        without re-running yt-dlp.
+
+        Product path:
+        ```
+        vvx sense <url> --moments --moment-limit 10
+        ```
+
+        Debug/eval path:
+        ```
+        vvx moments --from-sense result.json --limit 10 --explain
+        ```
+
+        Output includes `rankedMoments`. With `--explain`, output also includes
+        pre-diversity `momentCandidates` for score debugging.
+
+        This is not search, gather, or clip extraction. It maps one transcript to
+        ranked moments.
         """
     }
 }
@@ -1391,6 +1472,38 @@ private extension DocsCommand {
                 "chapterIndex":    { "type": "integer", "description": "Index into chapters array; -1 if no chapters defined" }
               }
             },
+            "MomentScoreBreakdown": {
+              "type": "object",
+              "properties": {
+                "topicRelevance": { "type": "integer" },
+                "insight":        { "type": "integer" },
+                "concreteness":   { "type": "integer" },
+                "selfContained":  { "type": "integer" },
+                "chapter":        { "type": "integer" },
+                "qualityPenalty": { "type": "integer" },
+                "mmrDiversity":   { "type": "integer" }
+              }
+            },
+            "RankedMoment": {
+              "type": "object",
+              "required": ["id", "rank", "startSeconds", "endSeconds", "durationSeconds", "titleHint", "cleanText", "score", "candidateType", "confidence", "scoreBreakdown", "whySelected"],
+              "properties": {
+                "id":             { "type": "string" },
+                "rank":           { "type": "integer" },
+                "startSeconds":   { "type": "number" },
+                "endSeconds":     { "type": "number" },
+                "durationSeconds": { "type": "number" },
+                "titleHint":      { "type": "string" },
+                "cleanText":      { "type": "string" },
+                "score":          { "type": "integer", "description": "0-100 local moment score" },
+                "candidateType":  { "type": "string", "enum": ["insight", "concreteClaim", "comparison", "chapterMoment", "explanation"] },
+                "confidence":     { "type": "number" },
+                "chapterTitle":   { "type": ["string", "null"] },
+                "chapterIndex":   { "type": ["integer", "null"] },
+                "scoreBreakdown": { "$ref": "#/definitions/MomentScoreBreakdown" },
+                "whySelected":    { "type": "array", "items": { "type": "string" } }
+              }
+            },
             "SenseResult": {
               "type": "object",
               "required": ["schemaVersion", "success", "url", "title", "tags", "chapters", "transcriptBlocks", "completedAt"],
@@ -1414,6 +1527,7 @@ private extension DocsCommand {
                 "estimatedTokens":      { "type": ["integer", "null"], "description": "Exact sum of all block estimatedTokens. null when transcriptSource == none." },
                 "transcriptBlocks":     { "type": "array", "items": { "$ref": "#/definitions/TranscriptBlock" }, "description": "Empty when --metadata-only or no transcript." },
                 "chapters":             { "type": "array", "items": { "$ref": "#/definitions/VideoChapter" } },
+                "rankedMoments":        { "type": "array", "items": { "$ref": "#/definitions/RankedMoment" }, "description": "Present only when --moments is requested." },
                 "transcriptPath":       { "type": ["string", "null"], "description": "Absolute path to the .srt file. Escape hatch for raw SRT access." },
                 "completedAt":          { "type": "string", "format": "date-time" },
                 "sliced":               { "type": "boolean", "description": "true when --start or --end was used" },

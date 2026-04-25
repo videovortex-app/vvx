@@ -15,6 +15,7 @@ vvx sense <url>
 vvx sense <url> --transcript            # raw SRT text to stdout
 vvx sense <url> --markdown              # formatted Markdown document
 vvx sense <url> --metadata-only         # metadata + token budget; no transcript blocks
+vvx sense <url> --moments --moment-limit 10  # attach ranked aha moments
 vvx sense <url> --start HH:MM:SS --end HH:MM:SS  # time-range slice
 vvx sense <url> --browser safari        # access private/age-restricted content
 vvx sense <url> --transcript-dir ~/Desktop/srts   # override transcript output location
@@ -65,10 +66,54 @@ vvx <url>                               # shorthand (sense is the default)
       "estimatedTokens": 890
     }
   ],
+  "rankedMoments": [
+    {
+      "id": "m1",
+      "rank": 1,
+      "startSeconds": 396.0,
+      "endSeconds": 456.0,
+      "durationSeconds": 60.0,
+      "titleHint": "Cost advantage",
+      "cleanText": "Moment transcript text.",
+      "score": 87,
+      "candidateType": "concreteClaim",
+      "confidence": 0.72,
+      "chapterTitle": "Cost advantage",
+      "chapterIndex": 2,
+      "scoreBreakdown": {
+        "topicRelevance": 6,
+        "insight": 18,
+        "concreteness": 24,
+        "selfContained": 12,
+        "chapter": 8,
+        "qualityPenalty": -2,
+        "mmrDiversity": 14
+      },
+      "whySelected": ["contains insight language", "distinct from other selected moments"]
+    }
+  ],
   "transcriptPath": "/Users/you/.vvx/transcripts/YouTube/Channel/Title.en.srt",
   "completedAt": "2026-03-24T10:30:00Z"
 }
 ```
+
+`rankedMoments` is present only when `--moments` is requested. Moment selection
+is a VVX core primitive: clients should render these results instead of ranking
+transcript sections themselves.
+
+### Moment ranking
+Product path:
+```
+vvx sense <url> --moments --moment-limit 10
+```
+
+Debug/eval path:
+```
+vvx moments --from-sense result.json --limit 10 --explain
+```
+
+`--explain` includes pre-diversity `momentCandidates`. Do not model best moments
+as `search`, `gather`, or `clip`; the primitive is `transcript -> ranked moments`.
 
 ### `--metadata-only` mode
 `transcriptBlocks` is empty but `estimatedTokens` and all chapter token counts are
@@ -93,8 +138,27 @@ Stop processing if `transcriptSource == "none"` — no usable transcript is avai
      then `--start`/`--end` for the relevant section, or `vvx search`.
 2. `transcriptBlocks` is the primary transcript interface. `transcriptPath` is an
    escape hatch for raw SRT access.
-3. For private or age-restricted content: retry with `--browser safari`.
-4. On error: read the `agentAction` field and execute it before escalating.
+3. For best moments in one video, use `vvx sense --moments` and consume
+   `rankedMoments`; do not rank moments in UI code.
+4. For private or age-restricted content: retry with `--browser safari`.
+5. On error: read the `agentAction` field and execute it before escalating.
+
+## moments — Dev/eval ranker for saved sense JSON
+
+Runs the same VVX core MomentRanker used by `sense --moments`, but from a local
+`SenseResult` JSON file. Use it to compare ranking changes without re-running
+yt-dlp.
+
+```
+vvx moments --from-sense result.json --limit 10
+vvx moments --from-sense result.json --limit 10 --explain
+```
+
+Output includes `rankedMoments`. With `--explain`, output also includes
+pre-diversity `momentCandidates` for score debugging.
+
+This is not search, gather, or clip extraction. It maps one transcript to ranked
+moments.
 
 ## fetch — Download video file to local archive
 

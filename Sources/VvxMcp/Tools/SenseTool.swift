@@ -19,6 +19,8 @@ enum SenseTool {
         let browserArg   = arguments["cookiesFromBrowser"] as? String
         let noSponsors   = arguments["noSponsors"]   as? Bool ?? false
         let metadataOnly = arguments["metadataOnly"] as? Bool ?? false
+        let moments      = arguments["moments"]      as? Bool ?? false
+        let momentLimit  = arguments["momentLimit"]  as? Int  ?? 4
         let startStr     = arguments["start"] as? String
         let endStr       = arguments["end"]   as? String
 
@@ -56,6 +58,13 @@ enum SenseTool {
             let err = VvxError(
                 code: .invalidTimeRange,
                 message: "Invalid time range: start (\(parsedStart)s) must be strictly less than end (\(parsedEnd)s).",
+                url: url)
+            return VvxErrorEnvelope(error: err).jsonString()
+        }
+        if momentLimit <= 0 {
+            let err = VvxError(
+                code: .parseError,
+                message: "momentLimit must be > 0.",
                 url: url)
             return VvxErrorEnvelope(error: err).jsonString()
         }
@@ -110,6 +119,8 @@ enum SenseTool {
         return format(result: result,
                       outputFormat: outputFormat,
                       metadataOnly: metadataOnly,
+                      moments: moments,
+                      momentLimit: momentLimit,
                       isSliced: isSliced,
                       parsedStart: parsedStart,
                       parsedEnd: parsedEnd)
@@ -121,16 +132,23 @@ enum SenseTool {
         result: SenseResult,
         outputFormat: String,
         metadataOnly: Bool,
+        moments: Bool,
+        momentLimit: Int,
         isSliced: Bool,
         parsedStart: Double,
         parsedEnd: Double
     ) -> String {
         // Apply slicing to output (DB always received full result upstream).
-        let outputResult: SenseResult
+        var outputResult: SenseResult
         if isSliced {
             outputResult = result.sliced(startSeconds: parsedStart, endSeconds: parsedEnd)
         } else {
             outputResult = result
+        }
+
+        if moments && outputFormat.lowercased() == "json" {
+            let ranked = MomentRanker.rankedMoments(for: outputResult, limit: momentLimit)
+            outputResult = outputResult.withRankedMoments(ranked)
         }
 
         switch outputFormat {

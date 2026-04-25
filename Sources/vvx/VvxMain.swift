@@ -28,6 +28,7 @@ struct Vvx: AsyncParsableCommand {
         subcommands: [
             ImplicitDefault.self,
             SenseCommand.self,
+            MomentsCommand.self,
             FetchCommand.self,
             DlCommand.self,
             SyncCommand.self,
@@ -90,8 +91,18 @@ struct ImplicitDefault: AsyncParsableCommand {
     @Flag(name: .long, help: "Request all English subtitle variants (en.*) for sense/fetch. Default is en,en-orig; safer against YouTube 429s.")
     var allSubs: Bool = false
 
+    @Flag(name: .long, help: "Attach local rankedMoments to JSON sense output.")
+    var moments: Bool = false
+
+    @Option(name: .customLong("moment-limit"), help: "Maximum ranked moments to return with --moments. Default: 4.")
+    var momentLimit: Int = 4
+
     mutating func run() async throws {
         VvxLogging.bootstrap()
+
+        if momentLimit <= 0 {
+            throw ValidationError("--moment-limit must be > 0.")
+        }
 
         if let batchPath = batch {
             try await runBatchSense(
@@ -131,6 +142,8 @@ struct ImplicitDefault: AsyncParsableCommand {
             cmd.noSponsors    = noSponsors
             cmd.noAutoUpdate  = noAutoUpdate
             cmd.allSubs       = allSubs
+            cmd.moments       = moments
+            cmd.momentLimit   = momentLimit
             try await cmd.run()
         }
     }
@@ -184,11 +197,19 @@ struct ImplicitDefault: AsyncParsableCommand {
                     for await event in senser.sense(config: senseConfig) {
                         switch event {
                         case .completed(let result):
+                            let outputResult: SenseResult
+                            if moments {
+                                outputResult = result.withRankedMoments(
+                                    MomentRanker.rankedMoments(for: result, limit: momentLimit)
+                                )
+                            } else {
+                                outputResult = result
+                            }
                             NDJSONStreamer.progressLine(
                                 index: currentIndex, total: total,
-                                title: result.title, success: true
+                                title: outputResult.title, success: true
                             )
-                            NDJSONStreamer.writeSenseResult(result)
+                            NDJSONStreamer.writeSenseResult(outputResult)
                             await succeeded.increment()
                         case .failed(let error):
                             NDJSONStreamer.progressLine(
