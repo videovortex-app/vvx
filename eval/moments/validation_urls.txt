@@ -1,0 +1,9 @@
+# MomentRanker validation set.
+# Add fresh videos here before tuning ranking logic so changes do not overfit
+# the debug/regression set.
+https://www.youtube.com/watch?v=eH8JdttKIdA&pp=ugUHEgVlbi1VUw%3D%3D
+https://www.youtube.com/watch?v=ilr3JfAfZXc&pp=ugUEEgJlbg%3D%3D
+https://www.youtube.com/watch?v=Yy659EQA2k4
+https://www.youtube.com/watch?v=RjfbvDXpFls&pp=ugUEEgJlbg%3D%3D
+https://www.youtube.com/watch?v=VFZb42SsZWc&pp=0gcJCdQKAYcqIYzv
+https://www.youtube.com/watch?v=Bj0i-yvIUQs

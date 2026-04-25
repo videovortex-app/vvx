@@ -1,0 +1,11 @@
+# MomentRanker debug/regression set.
+# These are intentionally "seen" videos. Use them to reproduce known failures,
+# not as the only quality signal for new ranking changes.
+https://www.youtube.com/watch?v=UVObNdNmzzw
+https://www.youtube.com/watch?v=PplmzlgE0kg
+https://www.youtube.com/watch?v=SSya123u9Yk
+https://www.youtube.com/watch?v=Qn2c_U-cWQs
+https://www.youtube.com/watch?v=I8j_yBfAepY
+https://www.youtube.com/watch?v=zgNvts_2TUE
+https://www.youtube.com/watch?v=t5qtlDh3C8c
+https://www.youtube.com/watch?v=dck_MBRg-Do
