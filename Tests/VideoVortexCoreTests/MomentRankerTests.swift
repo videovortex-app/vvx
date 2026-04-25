@@ -116,4 +116,32 @@ struct MomentRankerTests {
         #expect(ranked.first?.chapterTitle == "Ranking mistake")
         #expect(ranked.first?.chapterIndex == 0)
     }
+
+    @Test("CTA-heavy windows are penalized below useful claims")
+    func ctaHeavyWindowsArePenalized() {
+        let blocks = [
+            block(1, 0, "Make sure to subscribe and click the subscribe button because most viewers are not subscribed.", chapterIndex: 0),
+            block(2, 10, "Join the new society and learn in just three weeks from complete beginner to top 1% AI developer.", chapterIndex: 0),
+            block(3, 100, "The key result is that the model is 40x cheaper while preserving 97 percent of the useful coding performance.", chapterIndex: 1),
+            block(4, 110, "This means small automations can move to the cheaper model without changing the whole workflow.", chapterIndex: 1),
+            block(5, 120, "Compared to the previous setup, the same agents cost pennies instead of dollars per run.", chapterIndex: 1),
+        ]
+        let chapters = [
+            VideoChapter(title: "Subscribe", startTime: 0, endTime: 100, estimatedTokens: nil),
+            VideoChapter(title: "Cost analysis", startTime: 100, endTime: 140, estimatedTokens: nil),
+        ]
+        let result = SenseResult(
+            url: "https://example.com/video",
+            title: "Cost analysis",
+            transcriptSource: .manual,
+            transcriptBlocks: blocks,
+            estimatedTokens: blocks.map(\.estimatedTokens).reduce(0, +),
+            chapters: chapters
+        )
+
+        let ranked = MomentRanker.rankedMoments(for: result, limit: 1)
+
+        #expect(ranked.first?.chapterTitle == "Cost analysis")
+        #expect(ranked.first?.cleanText.contains("40x cheaper") == true)
+    }
 }

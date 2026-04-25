@@ -238,7 +238,7 @@ private func makeCandidate(
     let windowBlocks = range.compactMap { blocks.indices.contains($0) ? blocks[$0] : nil }
     guard let first = windowBlocks.first, let last = windowBlocks.last else { return nil }
 
-    let text = cleanTranscript(windowBlocks.map(\.text).joined(separator: " "))
+    let text = stitchBlockTexts(windowBlocks)
     guard !text.isEmpty else { return nil }
 
     let words = wordCount(text)
@@ -401,11 +401,36 @@ private func qualityPenalty(text: String, wordCount: Int) -> Int {
     if wordCount < 28 { penalty -= 8 }
     if text.range(of: #"\b(um|uh|like|you know)\b"#, options: .regularExpression) != nil { penalty -= 3 }
     if text.range(of: #"\b(\w+)\s+\1\b"#, options: [.regularExpression, .caseInsensitive]) != nil { penalty -= 4 }
+    penalty += fillerPenalty(text)
     if text.count > 0 {
         let punctuationCount = text.filter { ".?!,".contains($0) }.count
         if Double(punctuationCount) / Double(text.count) < 0.005 { penalty -= 3 }
     }
-    return max(-18, penalty)
+    return max(-35, penalty)
+}
+
+private func fillerPenalty(_ text: String) -> Int {
+    let weighted: [(String, Int)] = [
+        ("make sure to subscribe", -16),
+        ("click the subscribe", -16),
+        ("not subscribed", -14),
+        ("subscribe button", -14),
+        ("join the new society", -18),
+        ("new society", -12),
+        ("link below", -10),
+        ("description below", -10),
+        ("follow me on", -10),
+        ("instagram", -8),
+        ("twitter", -8),
+        ("complete beginner", -8),
+        ("top 1% ai developer", -14),
+        ("learn in just three weeks", -14),
+        ("my claim is that by the end", -10),
+        ("go ahead below the video", -12)
+    ]
+    return max(-35, weighted.reduce(0) { total, item in
+        total + (text.contains(item.0) ? item.1 : 0)
+    })
 }
 
 private func blockSignalScore(_ text: String) -> Int {
@@ -463,7 +488,7 @@ private func selectWithDiversity(
 
     var selected: [SelectedCandidate] = []
     while selected.count < limit, !pool.isEmpty {
-        var bestIndex = 0
+        var bestIndex: Int?
         var bestSelectionScore = Int.min
         var bestDiversity = 15
 
@@ -494,6 +519,7 @@ private func selectWithDiversity(
             }
         }
 
+        guard let bestIndex else { break }
         selected.append(SelectedCandidate(candidate: pool.remove(at: bestIndex), diversityBonus: bestDiversity))
     }
 
@@ -544,6 +570,45 @@ private func cleanTranscript(_ text: String) -> String {
     text
         .replacingOccurrences(of: #"\s+"#, with: " ", options: .regularExpression)
         .trimmingCharacters(in: .whitespacesAndNewlines)
+}
+
+private func stitchBlockTexts(_ blocks: [TranscriptBlock]) -> String {
+    var stitchedTokens: [String] = []
+
+    for block in blocks {
+        let incoming = block.text
+            .split(whereSeparator: \.isWhitespace)
+            .map(String.init)
+        guard !incoming.isEmpty else { continue }
+
+        guard !stitchedTokens.isEmpty else {
+            stitchedTokens = incoming
+            continue
+        }
+
+        let maxOverlap = min(stitchedTokens.count, incoming.count, 40)
+        var overlap = 0
+        if maxOverlap > 0 {
+            for count in stride(from: maxOverlap, through: 1, by: -1) {
+                let lhs = stitchedTokens.suffix(count).map(normalizedToken)
+                let rhs = incoming.prefix(count).map(normalizedToken)
+                if lhs == rhs {
+                    overlap = count
+                    break
+                }
+            }
+        }
+
+        stitchedTokens.append(contentsOf: incoming.dropFirst(overlap))
+    }
+
+    return cleanTranscript(stitchedTokens.joined(separator: " "))
+}
+
+private func normalizedToken(_ token: String) -> String {
+    token
+        .lowercased()
+        .trimmingCharacters(in: CharacterSet.alphanumerics.inverted)
 }
 
 private func wordCount(_ text: String) -> Int {
