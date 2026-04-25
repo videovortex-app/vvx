@@ -237,6 +237,129 @@ private func buildWindow(
     return (startIndex, endIndex)
 }
 
+private func refineBoundaryRange(
+    blocks: [TranscriptBlock],
+    range: ClosedRange<Int>,
+    config: MomentRankerConfig
+) -> ClosedRange<Int> {
+    guard !blocks.isEmpty else { return range }
+    var startIndex = max(0, range.lowerBound)
+    var endIndex = min(blocks.count - 1, range.upperBound)
+    guard startIndex <= endIndex else { return range }
+
+    startIndex = expandStartBoundary(
+        blocks: blocks,
+        startIndex: startIndex,
+        endIndex: endIndex,
+        config: config
+    )
+    endIndex = expandEndBoundary(
+        blocks: blocks,
+        startIndex: startIndex,
+        endIndex: endIndex,
+        config: config
+    )
+
+    return startIndex ... endIndex
+}
+
+private func expandStartBoundary(
+    blocks: [TranscriptBlock],
+    startIndex: Int,
+    endIndex: Int,
+    config: MomentRankerConfig
+) -> Int {
+    var startIndex = startIndex
+    var expansions = 0
+
+    while startIndex > 0, expansions < 4 {
+        let previousIndex = startIndex - 1
+        let current = blocks[startIndex]
+        let previous = blocks[previousIndex]
+
+        let lookaheadEnd = min(endIndex, startIndex + 2)
+        let currentText = stitchBlockTexts(Array(blocks[startIndex ... lookaheadEnd]))
+        let startsIncomplete = startsLikelyIncomplete(currentText)
+        let hasOverlap = hasRollingCaptionOverlap(previous, current)
+        let shouldExpand = startsIncomplete || hasOverlap
+
+        guard shouldExpand else { break }
+        guard canBorrowBoundaryBlock(
+            borrowed: previous,
+            adjacent: current,
+            opposite: blocks[endIndex],
+            allowCrossChapter: startsIncomplete || hasOverlap,
+            config: config
+        ) else { break }
+        startIndex = previousIndex
+        expansions += 1
+    }
+
+    return startIndex
+}
+
+private func expandEndBoundary(
+    blocks: [TranscriptBlock],
+    startIndex: Int,
+    endIndex: Int,
+    config: MomentRankerConfig
+) -> Int {
+    var endIndex = endIndex
+    var expansions = 0
+
+    while endIndex + 1 < blocks.count, expansions < 4 {
+        let current = blocks[endIndex]
+        let next = blocks[endIndex + 1]
+
+        let lookbackStart = max(startIndex, endIndex - 2)
+        let currentText = stitchBlockTexts(Array(blocks[lookbackStart ... endIndex]))
+        guard endsLikelyIncomplete(currentText) else { break }
+        guard canBorrowBoundaryBlock(
+            borrowed: next,
+            adjacent: current,
+            opposite: blocks[startIndex],
+            allowCrossChapter: hasRollingCaptionOverlap(current, next),
+            config: config
+        ) else { break }
+
+        endIndex += 1
+        expansions += 1
+    }
+
+    return endIndex
+}
+
+private func canBorrowBoundaryBlock(
+    borrowed: TranscriptBlock,
+    adjacent: TranscriptBlock,
+    opposite: TranscriptBlock,
+    allowCrossChapter: Bool,
+    config: MomentRankerConfig
+) -> Bool {
+    if let borrowedChapter = borrowed.chapterIndex,
+       let adjacentChapter = adjacent.chapterIndex,
+       borrowedChapter != adjacentChapter,
+       !allowCrossChapter {
+        return false
+    }
+
+    let gap = max(
+        0.0,
+        max(borrowed.startSeconds, adjacent.startSeconds) - min(borrowed.endSeconds, adjacent.endSeconds)
+    )
+    guard gap <= 3.0 else { return false }
+
+    let start = min(borrowed.startSeconds, opposite.startSeconds)
+    let end = max(borrowed.endSeconds, opposite.endSeconds)
+    guard end - start <= config.maxDurationSeconds else { return false }
+
+    return !contextBlockLooksPromotional(borrowed.text)
+}
+
+private func hasRollingCaptionOverlap(_ lhs: TranscriptBlock, _ rhs: TranscriptBlock) -> Bool {
+    rollingTokenOverlap(lhs.text, rhs.text) >= 2 || rollingTokenOverlap(rhs.text, lhs.text) >= 2
+}
+
 private func makeCandidate(
     blocks: [TranscriptBlock],
     range: ClosedRange<Int>,
@@ -244,7 +367,8 @@ private func makeCandidate(
     topicTerms: Set<String>,
     config: MomentRankerConfig
 ) -> MomentCandidate? {
-    let windowBlocks = range.compactMap { blocks.indices.contains($0) ? blocks[$0] : nil }
+    let refinedRange = refineBoundaryRange(blocks: blocks, range: range, config: config)
+    let windowBlocks = refinedRange.compactMap { blocks.indices.contains($0) ? blocks[$0] : nil }
     guard let first = windowBlocks.first, let last = windowBlocks.last else { return nil }
 
     let text = stitchBlockTexts(windowBlocks)
@@ -435,20 +559,95 @@ private func leadingFragmentPenalty(_ text: String) -> Int {
     guard let firstRaw = trimmed.split(whereSeparator: \.isWhitespace).first else { return 0 }
 
     let first = normalizedToken(String(firstRaw))
-    let weakStarts: Set<String> = [
-        "and", "but", "because", "so", "then", "than", "or", "to", "of",
-        "for", "from", "with", "without", "instead", "rather", "into", "out",
-        "comes", "came", "coming", "was", "were", "is", "are", "be", "been",
-        "being", "does", "did", "do", "has", "have", "had", "edge", "game",
-        "guy", "kernel", "approval"
-    ]
 
-    var penalty = weakStarts.contains(first) ? -8 : 0
+    var penalty = weakStartTokens.contains(first) ? -8 : 0
     if ["uh", "um", "yeah", "okay"].contains(first) { penalty -= 5 }
     if firstRaw.hasSuffix(".") && wordCount(trimmed) > 12 { penalty -= 5 }
     if trimmed.hasPrefix(">>") { penalty -= 2 }
 
     return max(-12, penalty)
+}
+
+private let weakStartTokens: Set<String> = [
+    "and", "but", "because", "so", "then", "than", "or", "to", "of",
+    "for", "from", "with", "without", "instead", "rather", "into", "out",
+    "comes", "came", "coming", "was", "were", "is", "are", "be", "been",
+    "being", "does", "did", "do", "has", "have", "had", "edge", "game",
+    "guy", "kernel", "approval", "able", "kind", "stuff", "long"
+]
+
+private let weakEndTokens: Set<String> = [
+    "and", "but", "because", "so", "then", "than", "or", "to", "of",
+    "for", "from", "with", "without", "instead", "rather", "into", "out",
+    "the", "a", "an", "that", "this", "it", "its", "is", "are", "was",
+    "were", "be", "been", "being", "have", "has", "had", "as", "like",
+    "which", "who", "what", "why", "how"
+]
+
+private func startsLikelyIncomplete(_ text: String) -> Bool {
+    let trimmed = stripSpeakerMarkerPrefix(text)
+    guard let firstRaw = trimmed.split(whereSeparator: \.isWhitespace).first else { return false }
+
+    let first = normalizedToken(String(firstRaw))
+    if weakStartTokens.contains(first) { return true }
+    if let scalar = firstRaw.unicodeScalars.first,
+       CharacterSet.lowercaseLetters.contains(scalar) {
+        return true
+    }
+    if let firstCharacter = firstRaw.first,
+       [",", ";", ":", ")", "]"].contains(firstCharacter) {
+        return true
+    }
+    return false
+}
+
+private func endsLikelyIncomplete(_ text: String) -> Bool {
+    let trimmed = stripSpeakerMarkerPrefix(text)
+    guard let lastRaw = trimmed.split(whereSeparator: \.isWhitespace).last else { return false }
+
+    let last = normalizedToken(String(lastRaw))
+    if weakEndTokens.contains(last) { return true }
+    guard let finalCharacter = trimmed.last else { return false }
+    return !".?!".contains(finalCharacter)
+}
+
+private func stripSpeakerMarkerPrefix(_ text: String) -> String {
+    var trimmed = text.trimmingCharacters(in: .whitespacesAndNewlines)
+    while trimmed.hasPrefix(">>") {
+        trimmed = String(trimmed.dropFirst(2)).trimmingCharacters(in: .whitespacesAndNewlines)
+    }
+    return trimmed
+}
+
+private func rollingTokenOverlap(_ left: String, _ right: String) -> Int {
+    let leftTokens = left
+        .split(whereSeparator: \.isWhitespace)
+        .map { normalizedToken(String($0)) }
+        .filter { !$0.isEmpty }
+    let rightTokens = right
+        .split(whereSeparator: \.isWhitespace)
+        .map { normalizedToken(String($0)) }
+        .filter { !$0.isEmpty }
+    let maxOverlap = min(leftTokens.count, rightTokens.count, 12)
+    guard maxOverlap > 0 else { return 0 }
+
+    for count in stride(from: maxOverlap, through: 1, by: -1) {
+        if Array(leftTokens.suffix(count)) == Array(rightTokens.prefix(count)) {
+            return count
+        }
+    }
+    return 0
+}
+
+private func contextBlockLooksPromotional(_ text: String) -> Bool {
+    let lower = text.lowercased()
+    if hardLeadInScore(String(lower.prefix(700))) >= 16 { return true }
+    let phrases = [
+        "vanta.com", "workos.com", "works.com", "supporting sponsor",
+        "make sure to subscribe", "click the subscribe", "join the new society",
+        "promo code", "use code", "learn more at"
+    ]
+    return phrases.contains(where: lower.contains)
 }
 
 private func fillerPenalty(_ text: String) -> Int {

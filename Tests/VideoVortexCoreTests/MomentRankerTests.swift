@@ -18,6 +18,19 @@ struct MomentRankerTests {
         )
     }
 
+    private func block(_ index: Int, _ start: Double, _ end: Double, _ text: String, chapterIndex: Int? = nil) -> TranscriptBlock {
+        let words = text.split(whereSeparator: \.isWhitespace).count
+        return TranscriptBlock(
+            index: index,
+            startSeconds: start,
+            endSeconds: end,
+            text: text,
+            wordCount: words,
+            estimatedTokens: Int((Double(words) * 1.3).rounded()),
+            chapterIndex: chapterIndex
+        )
+    }
+
     @Test("Ranks concrete insight windows above generic transcript")
     func ranksConcreteInsightWindows() {
         let blocks = [
@@ -255,6 +268,116 @@ struct MomentRankerTests {
 
         #expect(ranked.first?.chapterTitle == "Self-contained cost result")
         #expect(ranked.first?.cleanText.hasPrefix("The key result") == true)
+    }
+
+    @Test("Overlapping caption lead-ins are expanded into the moment")
+    func overlappingCaptionLeadInsAreExpanded() {
+        let blocks = [
+            block(1, 0, 2, "Welcome back. We are going to look at model benchmarks today.", chapterIndex: 0),
+            block(2, 17, 19, "what you need to realize is that Deep Seek", chapterIndex: 1),
+            block(3, 20, 22, "Deep Seek comes in two sizes. Deepseek V4 Pro and", chapterIndex: 1),
+            block(4, 22, 24, "Deepseek V4 Pro and DeepSeek Flash are 40 percent cheaper because", chapterIndex: 1),
+            block(5, 24, 26, "because cached context avoids repeated work for agents.", chapterIndex: 1),
+        ]
+        let chapters = [
+            VideoChapter(title: "Intro", startTime: 0, endTime: 10, estimatedTokens: nil),
+            VideoChapter(title: "Benchmark comparison", startTime: 10, endTime: 40, estimatedTokens: nil),
+        ]
+        let result = SenseResult(
+            url: "https://example.com/video",
+            title: "Benchmark comparison",
+            transcriptSource: .manual,
+            transcriptBlocks: blocks,
+            estimatedTokens: blocks.map(\.estimatedTokens).reduce(0, +),
+            chapters: chapters
+        )
+
+        let ranking = MomentRanker.rank(
+            result: result,
+            config: MomentRankerConfig(
+                limit: 1,
+                minDurationSeconds: 2,
+                targetDurationSeconds: 4,
+                maxDurationSeconds: 12,
+                strideSeconds: 20,
+                qualityThreshold: 0
+            )
+        )
+
+        #expect(ranking.rankedMoments.first?.startSeconds == 17)
+        #expect(ranking.rankedMoments.first?.cleanText.hasPrefix("what you need to realize") == true)
+    }
+
+    @Test("Incomplete caption endings are extended")
+    func incompleteCaptionEndingsAreExtended() {
+        let blocks = [
+            block(1, 0, 2, "The key result is that the model is 40 percent cheaper because", chapterIndex: 0),
+            block(2, 2, 4, "because cached context avoids repeated transcript work and", chapterIndex: 0),
+            block(3, 4, 6, "and this means teams can run the agent every hour.", chapterIndex: 0),
+        ]
+        let chapters = [
+            VideoChapter(title: "Cost result", startTime: 0, endTime: 20, estimatedTokens: nil),
+        ]
+        let result = SenseResult(
+            url: "https://example.com/video",
+            title: "Cost result",
+            transcriptSource: .manual,
+            transcriptBlocks: blocks,
+            estimatedTokens: blocks.map(\.estimatedTokens).reduce(0, +),
+            chapters: chapters
+        )
+
+        let ranking = MomentRanker.rank(
+            result: result,
+            config: MomentRankerConfig(
+                limit: 1,
+                minDurationSeconds: 2,
+                targetDurationSeconds: 4,
+                maxDurationSeconds: 10,
+                strideSeconds: 20,
+                qualityThreshold: 0
+            )
+        )
+
+        #expect(ranking.rankedMoments.first?.endSeconds == 6)
+        #expect(ranking.rankedMoments.first?.cleanText.contains("every hour.") == true)
+    }
+
+    @Test("Overlapping lead-ins can cross chapter boundaries")
+    func overlappingLeadInsCanCrossChapterBoundaries() {
+        let blocks = [
+            block(1, 0, 2, "architecture itself. But the most interesting part is the hardware,", chapterIndex: 0),
+            block(2, 2, 4, "part is the hardware, the GPUs. If you think about it, this", chapterIndex: 1),
+            block(3, 4, 6, "the GPUs. If you think about it, this model is 40 percent cheaper because", chapterIndex: 1),
+            block(4, 6, 8, "because it was not trained on the best hardware.", chapterIndex: 1),
+        ]
+        let chapters = [
+            VideoChapter(title: "Architecture", startTime: 0, endTime: 2, estimatedTokens: nil),
+            VideoChapter(title: "GPU story", startTime: 2, endTime: 20, estimatedTokens: nil),
+        ]
+        let result = SenseResult(
+            url: "https://example.com/video",
+            title: "GPU story",
+            transcriptSource: .manual,
+            transcriptBlocks: blocks,
+            estimatedTokens: blocks.map(\.estimatedTokens).reduce(0, +),
+            chapters: chapters
+        )
+
+        let ranking = MomentRanker.rank(
+            result: result,
+            config: MomentRankerConfig(
+                limit: 1,
+                minDurationSeconds: 2,
+                targetDurationSeconds: 4,
+                maxDurationSeconds: 10,
+                strideSeconds: 2,
+                qualityThreshold: 0
+            )
+        )
+
+        #expect(ranking.rankedMoments.first?.startSeconds == 0)
+        #expect(ranking.rankedMoments.first?.cleanText.contains("the most interesting part is the hardware") == true)
     }
 
     @Test("Diversity penalizes repeated chapter picks")
