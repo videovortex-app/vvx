@@ -60,15 +60,33 @@ while IFS= read -r url; do
 done < "$URL_FILE"
 
 top_tsv="$out_dir/top-ranked-moments.tsv"
-printf '%s\t%s\t%s\t%s\t%s\t%s\t%s\t%s\n' \
-  "video_id" "rank" "score" "start" "end" "chapter" "center_sentence" "signals" \
+printf '%s\t%s\t%s\t%s\t%s\t%s\t%s\t%s\t%s\t%s\t%s\t%s\t%s\t%s\t%s\n' \
+  "video_id" "rank" "score" "would_user_click" "selected_for_product" "content_mode" \
+  "sponsor_detected" "start" "end" "chapter" "center_sentence" "signals" "usefulness" \
+  "mode_boosts" "mode_penalties" \
   > "$top_tsv"
 
 for f in "$out_dir"/*.moments.json; do
   id="$(basename "$f" .moments.json)"
   jq -r --arg id "$id" '
     (.rankedMoments // [])[]
-    | [$id, .rank, .score, .startSeconds, .endSeconds, (.chapterTitle // ""), (.centerSentence // ""), ((.productWorthinessSignals // []) | join(","))]
+    | [
+        $id,
+        .rank,
+        .score,
+        (.wouldUserClickScore // ""),
+        (if .selectedForProduct == null then "" else (.selectedForProduct | tostring) end),
+        (.contentMode // ""),
+        (if .sponsorDetected == null then "" else (.sponsorDetected | tostring) end),
+        .startSeconds,
+        .endSeconds,
+        (.chapterTitle // ""),
+        (.centerSentence // ""),
+        ((.productWorthinessSignals // []) | join(",")),
+        ((.usefulnessSignals // []) | join(",")),
+        ((.modeSpecificBoosts // []) | join(",")),
+        ((.modeSpecificPenalties // []) | join(","))
+      ]
     | @tsv
   ' "$f" >> "$top_tsv"
 done
@@ -89,12 +107,14 @@ report="$out_dir/raw-detailed-report.md"
     jq -r '[((.rankedMoments // [])|length), ((.momentCandidates // [])|length), ((.rejectedAnchors // [])|length)] | @tsv' "$f"
   done
   printf '```\n\n'
-  printf '## Selected Moment Checks\n\n```tsv\nvideo_id\tselectedQuestionAnchors\tselectedUnalignedTopicZeroNumbers\n'
+  printf '## Selected Moment Checks\n\n```tsv\nvideo_id\tselectedQuestionAnchors\tselectedUnalignedTopicZeroNumbers\tselectedSponsors\tselectedNotProduct\n'
   for f in "$out_dir"/*.moments.json; do
     id="$(basename "$f" .moments.json)"
     question_count="$(jq -r '[.rankedMoments[]? | select((.centerSentence // "") | test("\\?$"))] | length' "$f")"
     unaligned_count="$(jq -r '[.rankedMoments[]? | select((.numberIsTopicAligned == false) and ((.cleanText // "") | test("[0-9]")) and ((.topicAlignment // 0) == 0))] | length' "$f")"
-    printf '%s\t%s\t%s\n' "$id" "$question_count" "$unaligned_count"
+    sponsor_count="$(jq -r '[.rankedMoments[]? | select(.sponsorDetected == true)] | length' "$f")"
+    not_product_count="$(jq -r '[.rankedMoments[]? | select(.selectedForProduct == false)] | length' "$f")"
+    printf '%s\t%s\t%s\t%s\t%s\n' "$id" "$question_count" "$unaligned_count" "$sponsor_count" "$not_product_count"
   done
   printf '```\n\n'
   printf '## Rejection Reason Totals\n\n```text\n'
@@ -106,7 +126,7 @@ report="$out_dir/raw-detailed-report.md"
     jq -r '"Title: \(.sourceTitle)\n\nURL: \(.sourceURL)\n"' "$f"
     jq -r '
       (.rankedMoments // [])[]
-      | "### #\(.rank) score=\(.score) duration=\(.durationSeconds)s time=\(.startSeconds)-\(.endSeconds)\n\nchapter: \(.chapterTitle // "n/a")\ntitleHint: \(.titleHint)\ncenterSentence: \(.centerSentence // "n/a")\nanchorScore: \(.anchorScore // 0)\ntopicAlignment: \(.topicAlignment // 0)\nchapterSpecificity: \(.chapterSpecificity // 0)\nnumberIsTopicAligned: \(.numberIsTopicAligned // false)\nhasConsequenceNearby: \(.hasConsequenceNearby // false)\nproductWorthinessSignals: \((.productWorthinessSignals // []) | join(", "))\nscoreBreakdown: topic=\(.scoreBreakdown.topicRelevance) insight=\(.scoreBreakdown.insight) concrete=\(.scoreBreakdown.concreteness) selfContained=\(.scoreBreakdown.selfContained) chapter=\(.scoreBreakdown.chapter) qualityPenalty=\(.scoreBreakdown.qualityPenalty) mmr=\(.scoreBreakdown.mmrDiversity)\nwhySelected: \((.whySelected // []) | join("; "))\n\n```text\n\(.cleanText)\n```\n"
+      | "### #\(.rank) score=\(.score) click=\(.wouldUserClickScore // 0) duration=\(.durationSeconds)s time=\(.startSeconds)-\(.endSeconds)\n\nchapter: \(.chapterTitle // "n/a")\ncontentMode: \(.contentMode // "n/a")\nselectedForProduct: \(.selectedForProduct // false)\nsponsorDetected: \(.sponsorDetected // false)\ntitleHint: \(.titleHint)\ncenterSentence: \(.centerSentence // "n/a")\nanchorScore: \(.anchorScore // 0)\ntopicAlignment: \(.topicAlignment // 0)\nchapterSpecificity: \(.chapterSpecificity // 0)\nnumberIsTopicAligned: \(.numberIsTopicAligned // false)\nhasConsequenceNearby: \(.hasConsequenceNearby // false)\nproductWorthinessSignals: \((.productWorthinessSignals // []) | join(", "))\nusefulnessSignals: \((.usefulnessSignals // []) | join(", "))\nmodeSpecificBoosts: \((.modeSpecificBoosts // []) | join(", "))\nmodeSpecificPenalties: \((.modeSpecificPenalties // []) | join(", "))\nscoreBreakdown: topic=\(.scoreBreakdown.topicRelevance) insight=\(.scoreBreakdown.insight) concrete=\(.scoreBreakdown.concreteness) selfContained=\(.scoreBreakdown.selfContained) chapter=\(.scoreBreakdown.chapter) qualityPenalty=\(.scoreBreakdown.qualityPenalty) mmr=\(.scoreBreakdown.mmrDiversity)\nwhySelected: \((.whySelected // []) | join("; "))\n\n```text\n\(.cleanText)\n```\n"
     ' "$f"
     printf '### Rejected Anchor Reasons\n\n```text\n'
     jq -r '.rejectedAnchors[]? | .rejectionReason' "$f" | sort | uniq -c | sort -nr

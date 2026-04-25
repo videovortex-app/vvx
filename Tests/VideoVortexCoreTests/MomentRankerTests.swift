@@ -118,8 +118,8 @@ struct MomentRankerTests {
         #expect(ranking.momentCandidates?.first?.centerSentence != nil)
     }
 
-    @Test("V7 gates reject question anchors and unaligned numbers")
-    func v7GatesRejectQuestionAnchorsAndUnalignedNumbers() {
+    @Test("V8 gates reject question anchors and unaligned numbers")
+    func v8GatesRejectQuestionAnchorsAndUnalignedNumbers() {
         let blocks = [
             block(1, 0, 8, "What are the biggest bottlenecks when you look today?", chapterIndex: 0),
             block(2, 8, 16, "How do they go from like how do they make a similar thing?", chapterIndex: 0),
@@ -157,13 +157,58 @@ struct MomentRankerTests {
         #expect(first?.cleanText.contains("40x cheaper") == true)
         #expect(first?.cleanText.contains("11 percent alcohol") == false)
         #expect(first?.centerSentence?.hasSuffix("?") == false)
-        #expect(first?.numberIsTopicAligned == true)
         #expect(first?.hasConsequenceNearby == true)
-        #expect(first?.productWorthinessSignals?.contains("topic_aligned_number") == true)
+        #expect(first?.selectedForProduct == true)
+        #expect((first?.wouldUserClickScore ?? 0) >= 48)
 
         let rejectionReasons = Set(ranking.rejectedAnchors?.map(\.rejectionReason) ?? [])
         #expect(rejectionReasons.contains("question_anchor"))
-        #expect(rejectionReasons.contains("anchor_score_below_threshold") || rejectionReasons.contains("no_topic_or_consequence"))
+        #expect(rejectionReasons.contains("interviewer_setup"))
+    }
+
+    @Test("V8 click-worthiness rejects setup sponsor and vague rules")
+    func v8ClickWorthinessRejectsSetupSponsorAndVagueRules() {
+        let blocks = [
+            block(1, 0, 8, "You mentioned the new Cursor 2.0 launch and talk about why people should care.", chapterIndex: 0),
+            block(2, 8, 16, "Dream Team sent us a box of goodies with green tea and 11 ingredients for this episode.", chapterIndex: 0),
+            block(3, 16, 24, "You have to like something has to be right because it changes things.", chapterIndex: 0),
+            block(4, 60, 68, "The common mistake is accepting AI generated code without tests because silent failures ship to production.", chapterIndex: 1),
+            block(5, 68, 76, "The fix is to run evals after each agent change and compare the output before merging.", chapterIndex: 1),
+            block(6, 76, 84, "This means beginners can trust the workflow because every edit has a measurable safety check.", chapterIndex: 1),
+        ]
+        let chapters = [
+            VideoChapter(title: "Intro", startTime: 0, endTime: 50, estimatedTokens: nil),
+            VideoChapter(title: "Common mistake and eval fix", startTime: 50, endTime: 100, estimatedTokens: nil),
+        ]
+        let result = SenseResult(
+            url: "https://example.com/video",
+            title: "Cursor AI beginner tutorial",
+            transcriptSource: .manual,
+            transcriptBlocks: blocks,
+            estimatedTokens: blocks.map(\.estimatedTokens).reduce(0, +),
+            chapters: chapters
+        )
+
+        let ranking = MomentRanker.rank(
+            result: result,
+            config: MomentRankerConfig(
+                limit: 3,
+                includeCandidates: true,
+                minDurationSeconds: 6,
+                targetDurationSeconds: 20,
+                maxDurationSeconds: 34
+            )
+        )
+
+        let first = ranking.rankedMoments.first
+        #expect(first?.chapterTitle == "Common mistake and eval fix")
+        #expect(first?.cleanText.contains("run evals") == true)
+        #expect(first?.cleanText.contains("Dream Team") == false)
+        #expect(first?.cleanText.contains("something has to be right") == false)
+        #expect(first?.contentMode == "tutorial/how-to")
+        #expect(first?.selectedForProduct == true)
+        #expect(first?.sponsorDetected == false)
+        #expect(first?.usefulnessSignals?.contains("actionable_instruction") == true)
     }
 
     @Test("Empty transcript returns no moments")

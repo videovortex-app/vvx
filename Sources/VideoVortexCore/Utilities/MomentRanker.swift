@@ -61,16 +61,21 @@ public enum MomentRanker {
                 .joined(separator: " ")
         )
         let topicTerms = metadataTopicTerms.union(dominantTranscriptTerms(blocks))
+        let contentMode = detectContentMode(result: result, blocks: blocks)
 
         let generated = generateCandidates(
             blocks: blocks,
             chapters: result.chapters,
             topicTerms: topicTerms,
+            contentMode: contentMode,
             config: config
         )
 
         let candidates = generated.candidates
             .sorted {
+                if $0.productSelectionScore != $1.productSelectionScore {
+                    return $0.productSelectionScore > $1.productSelectionScore
+                }
                 if $0.baseScore != $1.baseScore { return $0.baseScore > $1.baseScore }
                 return $0.startSeconds < $1.startSeconds
             }
@@ -86,11 +91,11 @@ public enum MomentRanker {
             qualityThreshold: config.qualityThreshold
         )
         let orderedSelected = selected.sorted {
-            let leftScore = min(100, max(0, $0.candidate.baseScore + $0.diversityBonus))
-            let rightScore = min(100, max(0, $1.candidate.baseScore + $1.diversityBonus))
+            let leftScore = min(100, max(0, $0.candidate.productSelectionScore + $0.diversityBonus))
+            let rightScore = min(100, max(0, $1.candidate.productSelectionScore + $1.diversityBonus))
             if leftScore != rightScore { return leftScore > rightScore }
-            if $0.candidate.baseScore != $1.candidate.baseScore {
-                return $0.candidate.baseScore > $1.candidate.baseScore
+            if $0.candidate.productSelectionScore != $1.candidate.productSelectionScore {
+                return $0.candidate.productSelectionScore > $1.candidate.productSelectionScore
             }
             return $0.candidate.startSeconds < $1.candidate.startSeconds
         }
@@ -145,9 +150,17 @@ private struct MomentCandidate {
     let anchorRejected: Bool?
     let rejectionReason: String?
     let productWorthinessSignals: [String]
+    let contentMode: ContentMode
+    let wouldUserClickScore: Int
+    let usefulnessSignals: [String]
+    let modeSpecificBoosts: [String]
+    let modeSpecificPenalties: [String]
+    let sponsorDetected: Bool
+    let selectedForProduct: Bool
 
     var durationSeconds: Double { endSeconds - startSeconds }
     var baseScore: Int { min(85, max(0, breakdown.baseScore)) }
+    var productSelectionScore: Int { wouldUserClickScore }
 
     func asMoment(
         rank: Int,
@@ -156,7 +169,7 @@ private struct MomentCandidate {
         extraWhy: [String] = []
     ) -> RankedMoment {
         let finalBreakdown = breakdown.withMMRDiversity(mmrDiversity)
-        let finalScore = min(100, max(0, baseScore + mmrDiversity))
+        let finalScore = min(100, max(0, wouldUserClickScore + (mmrDiversity / 2)))
         return RankedMoment(
             id: "\(idPrefix)\(rank)",
             rank: rank,
@@ -181,7 +194,14 @@ private struct MomentCandidate {
             hasConsequenceNearby: hasConsequenceNearby,
             anchorRejected: anchorRejected,
             rejectionReason: rejectionReason,
-            productWorthinessSignals: productWorthinessSignals.isEmpty ? nil : productWorthinessSignals
+            productWorthinessSignals: productWorthinessSignals.isEmpty ? nil : productWorthinessSignals,
+            contentMode: contentMode.rawValue,
+            wouldUserClickScore: wouldUserClickScore,
+            usefulnessSignals: usefulnessSignals.isEmpty ? nil : usefulnessSignals,
+            modeSpecificBoosts: modeSpecificBoosts.isEmpty ? nil : modeSpecificBoosts,
+            modeSpecificPenalties: modeSpecificPenalties.isEmpty ? nil : modeSpecificPenalties,
+            sponsorDetected: sponsorDetected,
+            selectedForProduct: selectedForProduct
         )
     }
 }
@@ -225,20 +245,251 @@ private struct CandidateGenerationResult {
     let rejectedAnchors: [RejectedMomentAnchor]
 }
 
+private enum ContentMode: String, Sendable, Equatable {
+    case tutorialHowTo = "tutorial/how-to"
+    case podcastInterview = "podcast/interview"
+    case newsRoundup = "news/roundup"
+    case documentary
+    case productExplainer = "product/explainer"
+    case unknown
+}
+
+private struct ProductEvaluation {
+    let score: Int
+    let usefulnessSignals: [String]
+    let modeSpecificBoosts: [String]
+    let modeSpecificPenalties: [String]
+    let sponsorDetected: Bool
+    let selectedForProduct: Bool
+}
+
+private func detectContentMode(result: SenseResult, blocks: [TranscriptBlock]) -> ContentMode {
+    let metadata = ([result.title, result.description ?? ""] + result.tags + result.chapters.map(\.title))
+        .joined(separator: " ")
+        .lowercased()
+    let sample = blocks.prefix(140).map(\.text).joined(separator: " ").lowercased()
+    let combined = "\(metadata) \(sample)"
+
+    var scores: [ContentMode: Int] = [:]
+    func add(_ mode: ContentMode, _ points: Int) {
+        scores[mode, default: 0] += points
+    }
+    func hits(_ phrases: [String], in text: String = combined) -> Int {
+        phrases.reduce(0) { $0 + (text.contains($1) ? 1 : 0) }
+    }
+
+    add(.tutorialHowTo, hits(["tutorial", "course", "beginner", "full course", "how to", "step by step", "walkthrough"], in: metadata) * 8)
+    add(.tutorialHowTo, hits(["click", "open", "install", "create", "set up", "debug", "test the app", "run the command"], in: sample) * 2)
+
+    add(.podcastInterview, hits(["podcast", "interview", "guest", "founder", "my first million", "lex fridman", "startup ideas"], in: metadata) * 8)
+    add(.podcastInterview, hits(["thanks for coming", "thanks for having me", "on the show", "talk about", "tell me about"], in: sample) * 3)
+
+    add(.newsRoundup, hits(["news", "daily", "roundup", "today", "latest", "updates", "launches", "released"], in: metadata) * 7)
+    add(.newsRoundup, hits(["all right, more", "more on", "story", "headline", "breaking", "market cap"], in: sample) * 3)
+
+    add(.documentary, hits(["documentary", "frontline", "nova", "pbs", "tribeca", "full documentary", "film festival"], in: metadata) * 10)
+    add(.documentary, hits(["[music]", "narrator", "in those days", "lifetime", "history"], in: sample) * 3)
+
+    add(.productExplainer, hits(["explained", "what is", "clearly explained", "demo", "product", "api", "framework", "agent", "tool"], in: metadata) * 6)
+    add(.productExplainer, hits(["this tool", "this product", "the api", "lets you", "allows you", "you can use"], in: sample) * 3)
+
+    let ranked = scores.sorted {
+        if $0.value != $1.value { return $0.value > $1.value }
+        return $0.key.rawValue < $1.key.rawValue
+    }
+    guard let best = ranked.first, best.value >= 8 else { return .unknown }
+    return best.key
+}
+
+private func evaluateProductQuality(
+    text: String,
+    centerSentence: String?,
+    contentMode: ContentMode,
+    baseScore: Int,
+    productWorthinessSignals: [String],
+    topicAlignment: Int,
+    numberIsTopicAligned: Bool?,
+    hasConsequenceNearby: Bool,
+    concretenessScore: Int,
+    insightScore: Int,
+    selfContainedScore: Int,
+    chapterTitle: String?,
+    startSeconds: Double
+) -> ProductEvaluation {
+    let lower = text.lowercased()
+    let center = (centerSentence ?? text).lowercased()
+    var score = min(56, max(22, baseScore))
+    var usefulness = Set<String>()
+    var boosts: [String] = []
+    var penalties: [String] = []
+
+    func boost(_ signal: String, _ points: Int) {
+        usefulness.insert(signal)
+        score += points
+    }
+    func modeBoost(_ signal: String, _ points: Int) {
+        boosts.append(signal)
+        score += points
+    }
+    func penalty(_ signal: String, _ points: Int) {
+        penalties.append(signal)
+        score -= points
+    }
+
+    if hasConsequenceNearby || lower.contains("this means") || lower.contains("why it matters") {
+        boost("clear_consequence", 9)
+    }
+    if lower.contains("because") || lower.contains("therefore") || lower.contains("as a result") || lower.contains("which is why") {
+        boost("causal_explanation", 8)
+    }
+    if lower.contains("instead of") || lower.contains("rather than") || lower.contains("tradeoff") || lower.contains("but actually") {
+        boost("decision_or_tradeoff", 8)
+    }
+    if lower.contains("mistake") || lower.contains("lesson") || lower.contains("learned") || lower.contains("the key") {
+        boost("explicit_lesson", 8)
+    }
+    if lower.contains("turns out") || lower.contains("surprising") || lower.contains("counterintuitive") || lower.contains("weird") {
+        boost("surprising_claim", 8)
+    }
+    if lower.contains("before") && lower.contains("now") || lower.contains("used to") && lower.contains("now") {
+        boost("before_after", 7)
+    }
+    if numberIsTopicAligned == true {
+        boost("topic_aligned_metric", hasConsequenceNearby ? 10 : 5)
+    }
+    if topicAlignment >= 8 {
+        boost("strong_topic_alignment", 4)
+    }
+    if selfContainedScore >= 10 {
+        boost("self_contained", 3)
+    }
+
+    let actionable = hasActionableInstruction(lower)
+    if actionable {
+        boost("actionable_instruction", 7)
+    }
+
+    let sponsorDetected = hasSponsorOrShoutout(lower)
+    if sponsorDetected {
+        penalty("sponsor_or_shoutout", 70)
+    }
+    if isInterviewerSetup(center) || isInterviewerSetup(String(lower.prefix(240))) {
+        penalty("interviewer_setup", 48)
+    }
+    if hasPodcastMetaFluff(lower) {
+        penalty("podcast_meta", 45)
+    }
+    if isVagueActionRule(center, concretenessScore: concretenessScore, topicAlignment: topicAlignment) {
+        penalty("vague_actionable_rule", 30)
+    }
+    if startsWithDanglingHook(center), concretenessScore < 10, topicAlignment < 6 {
+        penalty("dangling_context", 22)
+    }
+    if containsNarrationArtifact(lower) {
+        penalty("caption_or_music_artifact", 18)
+    }
+    if hasProcessWithoutPayoff(lower, usefulnessSignals: usefulness) {
+        penalty("process_without_payoff", 18)
+    }
+    if isNamedroppingWithoutLesson(lower, usefulnessSignals: usefulness) {
+        penalty("namedropping_without_lesson", 14)
+    }
+    if hasNumberWithoutPayoff(lower, numberIsTopicAligned: numberIsTopicAligned, usefulnessSignals: usefulness) {
+        penalty("number_without_payoff", 15)
+    }
+    if isIntroOrRecapOnly(lower, chapterTitle: chapterTitle, startSeconds: startSeconds) {
+        penalty("intro_or_recap", 18)
+    }
+    if isWeakCenterSentence(center, concretenessScore: concretenessScore, topicAlignment: topicAlignment) {
+        penalty("weak_center_sentence", 18)
+    }
+
+    switch contentMode {
+    case .tutorialHowTo:
+        if actionable { modeBoost("tutorial_actionable_step", 16) }
+        if lower.contains("common mistake") || lower.contains("if this fails") || lower.contains("fix") || lower.contains("debug") {
+            modeBoost("tutorial_failure_or_fix", 12)
+        }
+        if isTutorialMeta(lower) {
+            penalty("tutorial_meta_overview", 34)
+        }
+        if isToolDescriptionWithoutAction(lower), !actionable {
+            penalty("tool_description_without_action", 18)
+        }
+    case .podcastInterview:
+        if lower.contains("lesson") || lower.contains("mistake") || lower.contains("what i learned") || lower.contains("the key") {
+            modeBoost("podcast_lesson", 12)
+        }
+        if lower.contains("decided") || lower.contains("changed") || lower.contains("realized") {
+            modeBoost("podcast_decision_or_change", 10)
+        }
+        if isRandomAnecdoteWithoutLesson(lower, usefulnessSignals: usefulness) {
+            penalty("podcast_anecdote_without_lesson", 18)
+        }
+    case .newsRoundup:
+        if lower.contains("impact") || lower.contains("market") || lower.contains("policy") || lower.contains("company") || lower.contains("because") {
+            modeBoost("news_consequence", 12)
+        }
+        if isIsolatedNewsFact(lower, usefulnessSignals: usefulness) {
+            penalty("isolated_news_fact", 22)
+        }
+    case .documentary:
+        if lower.contains("this was") || lower.contains("that was") || lower.contains("because") || lower.contains("discovered") || lower.contains("realized") {
+            modeBoost("documentary_turning_point", 11)
+        }
+        if isDocumentarySceneSetting(lower, usefulnessSignals: usefulness) {
+            penalty("documentary_scene_fragment", 22)
+        }
+    case .productExplainer:
+        if lower.contains("lets you") || lower.contains("allows you") || lower.contains("now you can") || lower.contains("makes it possible") {
+            modeBoost("product_capability", 12)
+        }
+        if lower.contains("why this matters") || lower.contains("what is") || lower.contains("this means") {
+            modeBoost("product_explanation", 8)
+        }
+    case .unknown:
+        break
+    }
+
+    let hasPayoff = hasActualPayoff(usefulnessSignals: usefulness, lower: lower, productSignals: productWorthinessSignals)
+    if !hasPayoff {
+        penalty("no_actual_payoff", 22)
+    }
+
+    let hardBlocked = sponsorDetected
+        || penalties.contains("interviewer_setup")
+        || penalties.contains("podcast_meta")
+        || penalties.contains("vague_actionable_rule")
+        || penalties.contains("caption_or_music_artifact")
+    let finalScore = min(100, max(0, score))
+    let selected = finalScore >= 48 && hasPayoff && !hardBlocked
+
+    return ProductEvaluation(
+        score: finalScore,
+        usefulnessSignals: Array(usefulness).sorted(),
+        modeSpecificBoosts: Array(Set(boosts)).sorted(),
+        modeSpecificPenalties: Array(Set(penalties)).sorted(),
+        sponsorDetected: sponsorDetected,
+        selectedForProduct: selected
+    )
+}
+
 private func generateCandidates(
     blocks: [TranscriptBlock],
     chapters: [VideoChapter],
     topicTerms: Set<String>,
+    contentMode: ContentMode,
     config: MomentRankerConfig
 ) -> CandidateGenerationResult {
     let anchorCandidates = generateAnchorCandidates(
         blocks: blocks,
         chapters: chapters,
         topicTerms: topicTerms,
+        contentMode: contentMode,
         config: config
     )
 
-    if anchorCandidates.candidates.count >= min(config.limit, 4) {
+    if anchorCandidates.candidates.filter(\.selectedForProduct).count >= min(config.limit, 4) {
         return anchorCandidates
     }
 
@@ -246,6 +497,7 @@ private func generateCandidates(
         blocks: blocks,
         chapters: chapters,
         topicTerms: topicTerms,
+        contentMode: contentMode,
         config: config
     )
 
@@ -267,6 +519,7 @@ private func generateWindowCandidates(
     blocks: [TranscriptBlock],
     chapters: [VideoChapter],
     topicTerms: Set<String>,
+    contentMode: ContentMode,
     config: MomentRankerConfig
 ) -> [MomentCandidate] {
     var windows: [(start: Int, end: Int)] = []
@@ -342,6 +595,7 @@ private func generateWindowCandidates(
             range: window.start ... window.end,
             chapters: chapters,
             topicTerms: topicTerms,
+            contentMode: contentMode,
             config: config
         )
     }
@@ -351,9 +605,15 @@ private func generateAnchorCandidates(
     blocks: [TranscriptBlock],
     chapters: [VideoChapter],
     topicTerms: Set<String>,
+    contentMode: ContentMode,
     config: MomentRankerConfig
 ) -> CandidateGenerationResult {
-    let units = buildImpactUnits(blocks: blocks, chapters: chapters, topicTerms: topicTerms)
+    let units = buildImpactUnits(
+        blocks: blocks,
+        chapters: chapters,
+        topicTerms: topicTerms,
+        contentMode: contentMode
+    )
     guard !units.isEmpty else {
         return CandidateGenerationResult(candidates: [], rejectedAnchors: [])
     }
@@ -401,6 +661,7 @@ private func generateAnchorCandidates(
             anchor: anchor,
             chapters: chapters,
             topicTerms: topicTerms,
+            contentMode: contentMode,
             config: config
         ) else { continue }
         candidates.append(candidate)
@@ -415,7 +676,8 @@ private func generateAnchorCandidates(
 private func buildImpactUnits(
     blocks: [TranscriptBlock],
     chapters: [VideoChapter],
-    topicTerms: Set<String>
+    topicTerms: Set<String>,
+    contentMode: ContentMode
 ) -> [ImpactUnit] {
     struct PendingUnit {
         var startSeconds: Double
@@ -513,7 +775,8 @@ private func buildImpactUnits(
         let evaluation = anchorEvaluation(
             text: raw.text,
             chapterTitle: chapterTitle,
-            topicTerms: topicTerms
+            topicTerms: topicTerms,
+            contentMode: contentMode
         )
         return ImpactUnit(
             index: index,
@@ -564,7 +827,8 @@ private func finalizeAnchorText(_ text: String) -> String {
 private func anchorEvaluation(
     text: String,
     chapterTitle: String?,
-    topicTerms: Set<String>
+    topicTerms: Set<String>,
+    contentMode: ContentMode
 ) -> AnchorEvaluation {
     let lower = text.lowercased()
     let keywords = extractKeywords(text)
@@ -661,7 +925,15 @@ private func anchorEvaluation(
     }
 
     let processPenalty: Int
-    if processHits >= 2 {
+    if contentMode == .tutorialHowTo {
+        if isProcessSetupAnchor(lower) || isTutorialMeta(lower) {
+            processPenalty = -12
+        } else if processHits >= 2, !hasActionableInstruction(lower), !hasConsequenceNearby {
+            processPenalty = -8
+        } else {
+            processPenalty = 0
+        }
+    } else if processHits >= 2 {
         processPenalty = -20
     } else if processHits == 1, consequenceHits + contrastHits + decisionHits + outcomeHits == 0 {
         processPenalty = -8
@@ -678,11 +950,17 @@ private func anchorEvaluation(
     if wordCount(text) < 6 { anchorQualityPenalty -= 8 }
     if contextBlockLooksPromotional(text) { anchorQualityPenalty -= 35 }
     anchorQualityPenalty += podcastFluffPenalty(lower)
+    if hasSponsorOrShoutout(lower) { anchorQualityPenalty -= 45 }
+    if isInterviewerSetup(lower) { anchorQualityPenalty -= 30 }
+    if hasPodcastMetaFluff(lower) { anchorQualityPenalty -= 34 }
     if isQuestionAnchor(text) { anchorQualityPenalty -= 20 }
     if endsWithDanglingPhrase(text) { anchorQualityPenalty -= 25 }
-    if isProcessSetupAnchor(lower) { anchorQualityPenalty -= 18 }
+    if isProcessSetupAnchor(lower), contentMode != .tutorialHowTo { anchorQualityPenalty -= 18 }
     if isRandomAnecdoteAnchor(lower) { anchorQualityPenalty -= 16 }
     if hasDanglingPronounStart(text) { anchorQualityPenalty -= 5 }
+    if isVagueActionRule(lower, concretenessScore: concrete, topicAlignment: topic) {
+        anchorQualityPenalty -= 25
+    }
 
     let breakdown = MomentAnchorBreakdown(
         consequence: consequence,
@@ -952,6 +1230,259 @@ private func hasDanglingPronounStart(_ text: String) -> Bool {
     return !hasNumber && !hasNamedSubjectCue
 }
 
+private func containsAny(_ lower: String, _ phrases: [String]) -> Bool {
+    phrases.contains(where: lower.contains)
+}
+
+private func hasActionableInstruction(_ lower: String) -> Bool {
+    if containsAny(lower, ["shouldn't", "should not", "don't need to", "doesn't need to"]) {
+        return false
+    }
+
+    if lower.range(
+        of: #"\b(click|open|install|run|copy|paste|create|enable|disable|debug|test|deploy|compile|select|drag|drop|resize|move|delete|add|change|compare|check|ask|write|build|remove)\b"#,
+        options: .regularExpression
+    ) != nil {
+        return true
+    }
+
+    if lower.range(
+        of: #"\b(go to|set up|turn on|pull up|start a new|create a new|run evals|common mistake|if this fails|do this)\b"#,
+        options: .regularExpression
+    ) != nil {
+        return true
+    }
+
+    return lower.range(
+        of: #"\b(?:you|we|i)\s+(?:should|need to|have to|want to|can)\s+(?:click|open|run|copy|paste|create|enable|disable|test|debug|deploy|use|ask|start|stop|compare|check|write|build|remove|add|change)\b"#,
+        options: .regularExpression
+    ) != nil
+}
+
+private func hasSponsorOrShoutout(_ lower: String) -> Bool {
+    containsAny(
+        lower,
+        [
+            "supporting sponsor", "sponsor", "sponsored", "brought to you by",
+            "use code", "promo code", "check out", "learn more at", "link below",
+            "in the description", "description below", "subscribe", "sent us",
+            "box of goodies", "green tea", "ingredients", "dream team", "hubspot",
+            "supervibe", "vanta.com", "workos.com", "works.com", "as a listener",
+            "try it risk-free", "risk-free for 30 days", "abundant mines",
+            "own your machines", "bitcoin you mine"
+        ]
+    )
+}
+
+private func isInterviewerSetup(_ lower: String) -> Bool {
+    let trimmed = lower.trimmingCharacters(in: .whitespacesAndNewlines)
+    let triggers = [
+        "talk about", "tell me about", "i'm curious", "you mentioned",
+        "let's talk about", "walk me through", "explain to me", "i want to ask",
+        "i wanted to ask", "can you talk", "what are the biggest", "how do you think",
+        "i'd love to hear", "help me understand"
+    ]
+    return triggers.contains { trigger in
+        trimmed.hasPrefix(trigger) || trimmed.contains(" \(trigger)")
+    }
+}
+
+private func hasPodcastMetaFluff(_ lower: String) -> Bool {
+    containsAny(
+        lower,
+        [
+            "this podcast", "this episode", "my guest", "on the show",
+            "thanks for having me", "thanks for coming", "listen to this",
+            "startup ideas podcast", "before we start", "before we get started"
+        ]
+    )
+}
+
+private func hasConcreteSubjectCue(_ lower: String) -> Bool {
+    if lower.range(of: #"\d"#, options: .regularExpression) != nil { return true }
+    return containsAny(
+        lower,
+        [
+            "model", "company", "customer", "customers", "user", "users",
+            "revenue", "cost", "price", "workflow", "agent", "agents", "api",
+            "product", "market", "policy", "system", "benchmark", "eval",
+            "tests", "security", "bitcoin", "cursor", "deepseek", "firecrawl",
+            "dataset", "server", "founder", "team", "automation"
+        ]
+    )
+}
+
+private func isVagueActionRule(
+    _ lower: String,
+    concretenessScore: Int,
+    topicAlignment: Int
+) -> Bool {
+    let actionCue = containsAny(lower, ["have to", "has to", "need to", "should", "must"])
+    guard actionCue else { return false }
+
+    let vagueCue = containsAny(
+        lower,
+        ["something", "stuff", "things", "kind of", "sort of", "like something", "this thing"]
+    )
+    return vagueCue
+        && concretenessScore < 10
+        && topicAlignment < 6
+        && !hasConcreteSubjectCue(lower)
+}
+
+private func startsWithDanglingHook(_ lower: String) -> Bool {
+    let trimmed = lower.trimmingCharacters(in: .whitespacesAndNewlines)
+    let prefixes = [
+        "he ", "she ", "it ", "they ", "this ", "that ", "these ", "those ",
+        "the man who ", "the guy who ", "the person who ", "most "
+    ]
+    return prefixes.contains(where: trimmed.hasPrefix)
+}
+
+private func containsNarrationArtifact(_ lower: String) -> Bool {
+    containsAny(lower, ["[music]", "(music)", "[applause]", "(applause)", "♪"])
+}
+
+private func hasProcessWithoutPayoff(_ lower: String, usefulnessSignals: Set<String>) -> Bool {
+    let processHits = countMatches(
+        lower,
+        phrases: ["first", "then", "next", "step", "setup", "download", "install", "open the"]
+    )
+    guard processHits >= 2 else { return false }
+    return usefulnessSignals.isDisjoint(with: ["clear_consequence", "actionable_instruction", "causal_explanation"])
+}
+
+private func isNamedroppingWithoutLesson(_ lower: String, usefulnessSignals: Set<String>) -> Bool {
+    guard usefulnessSignals.isDisjoint(with: ["explicit_lesson", "clear_consequence", "decision_or_tradeoff"]) else {
+        return false
+    }
+    let nameDropCues = ["my friend", "i met", "i talked to", "he invited", "she invited", "cfo of", "ceo of"]
+    return containsAny(lower, nameDropCues)
+}
+
+private func hasNumberWithoutPayoff(
+    _ lower: String,
+    numberIsTopicAligned: Bool?,
+    usefulnessSignals: Set<String>
+) -> Bool {
+    guard lower.range(of: #"\d"#, options: .regularExpression) != nil else { return false }
+    if numberIsTopicAligned == true { return false }
+    return usefulnessSignals.isDisjoint(with: [
+        "clear_consequence", "causal_explanation", "decision_or_tradeoff",
+        "topic_aligned_metric", "surprising_claim"
+    ])
+}
+
+private func isIntroOrRecapOnly(
+    _ lower: String,
+    chapterTitle: String?,
+    startSeconds: Double
+) -> Bool {
+    let chapter = chapterTitle?.lowercased() ?? ""
+    let introContext = startSeconds < 150 || isIntroChapterTitle(chapter)
+    guard introContext else { return false }
+    return containsAny(
+        lower,
+        [
+            "welcome back", "today we're going to", "today we are going to",
+            "in this video", "we're going to cover", "we will cover",
+            "before we get into", "quick recap", "what we covered"
+        ]
+    )
+}
+
+private func isTutorialMeta(_ lower: String) -> Bool {
+    containsAny(
+        lower,
+        [
+            "we will cover", "we're going to cover", "in this course",
+            "in this section", "getting started", "before we", "this is cursor",
+            "cursor 2.0", "super fun for me", "we're currently in"
+        ]
+    )
+}
+
+private func isToolDescriptionWithoutAction(_ lower: String) -> Bool {
+    containsAny(
+        lower,
+        ["this is a tool", "this tool allows", "allows you to", "lets you", "new cursor 2.0"]
+    ) && !hasActionableInstruction(lower)
+}
+
+private func isRandomAnecdoteWithoutLesson(_ lower: String, usefulnessSignals: Set<String>) -> Bool {
+    guard usefulnessSignals.isDisjoint(with: ["explicit_lesson", "clear_consequence", "causal_explanation"]) else {
+        return false
+    }
+    return containsAny(
+        lower,
+        ["i was like", "my friend", "we went", "invited me", "i met", "i heard in", "one time"]
+    )
+}
+
+private func isIsolatedNewsFact(_ lower: String, usefulnessSignals: Set<String>) -> Bool {
+    guard usefulnessSignals.isDisjoint(with: ["clear_consequence", "causal_explanation", "decision_or_tradeoff"]) else {
+        return false
+    }
+    return containsAny(
+        lower,
+        ["more on this later", "all right, more", "one weird story", "ufo", "missing scientists"]
+    )
+}
+
+private func isDocumentarySceneSetting(_ lower: String, usefulnessSignals: Set<String>) -> Bool {
+    if containsNarrationArtifact(lower) { return true }
+    guard usefulnessSignals.isDisjoint(with: ["causal_explanation", "clear_consequence", "surprising_claim"]) else {
+        return false
+    }
+    return containsAny(lower, ["in those days", "years earlier", "at the time", "was born", "grew up"])
+}
+
+private func isWeakCenterSentence(
+    _ lower: String,
+    concretenessScore: Int,
+    topicAlignment: Int
+) -> Bool {
+    let trimmed = lower.trimmingCharacters(in: .whitespacesAndNewlines)
+    let weakPrefixes = [
+        "that's actually really good", "it might be", "i don't want", "i first met",
+        "try it risk-free", "you can come back", "the results were not very good",
+        "i said", "i gave", "yes, it looks", "we started generalizing"
+    ]
+    if weakPrefixes.contains(where: trimmed.hasPrefix),
+       concretenessScore < 14 || topicAlignment < 6 {
+        return true
+    }
+
+    if wordCount(trimmed) <= 7,
+       concretenessScore < 14,
+       !containsAny(trimmed, ["because", "therefore", "this means", "the key", "mistake"]) {
+        return true
+    }
+
+    return false
+}
+
+private func hasActualPayoff(
+    usefulnessSignals: Set<String>,
+    lower: String,
+    productSignals: [String]
+) -> Bool {
+    let strongUsefulness: Set<String> = [
+        "actionable_instruction", "clear_consequence", "surprising_claim",
+        "explicit_lesson", "causal_explanation", "decision_or_tradeoff",
+        "topic_aligned_metric", "before_after"
+    ]
+    if !usefulnessSignals.isDisjoint(with: strongUsefulness) { return true }
+
+    let strongProductSignals: Set<String> = [
+        "strong_contrast", "decision_point", "surprising_claim",
+        "topic_aligned_number", "topic_aligned_concrete_evidence"
+    ]
+    if !Set(productSignals).isDisjoint(with: strongProductSignals) { return true }
+
+    return containsAny(lower, ["what changes", "why it matters", "the mistake", "the lesson"])
+}
+
 private func deriveProductWorthinessSignals(
     text: String,
     breakdown: MomentAnchorBreakdown,
@@ -968,7 +1499,8 @@ private func deriveProductWorthinessSignals(
         || lower.contains("need to")
         || lower.contains("the key")
         || (lower.contains("have to") && !lower.contains("i have to imagine"))
-    if hasActionableRule {
+    if hasActionableRule,
+       !isVagueActionRule(lower, concretenessScore: breakdown.concrete, topicAlignment: breakdown.topic) {
         signals.append("actionable_rule")
     }
     if breakdown.novelty > 0 || lower.contains("surprising") || lower.contains("counterintuitive") || lower.contains("turns out") {
@@ -991,10 +1523,13 @@ private func anchorRejectionReason(
     productWorthinessSignals: [String]
 ) -> String? {
     let lower = text.lowercased()
+    if hasSponsorOrShoutout(lower) { return "sponsor_or_cta" }
+    if isInterviewerSetup(lower) { return "interviewer_setup" }
+    if hasPodcastMetaFluff(lower) { return "podcast_or_admin_fluff" }
     if contextBlockLooksPromotional(text) { return "sponsor_or_cta" }
     if isQuestionAnchor(text) { return "question_anchor" }
     if endsWithDanglingPhrase(text) { return "incomplete_fragment" }
-    if isProcessSetupAnchor(lower) { return "process_or_setup" }
+    if isProcessSetupAnchor(lower), !hasActionableInstruction(lower) { return "process_or_setup" }
     if isRandomAnecdoteAnchor(lower), topicAlignment < 4, breakdown.concrete < 14 {
         return "random_anecdote"
     }
@@ -1002,21 +1537,9 @@ private func anchorRejectionReason(
     if podcastFluffPenalty(lower) < 0, breakdown.consequence == 0, breakdown.contrast == 0 {
         return "interviewer_setup"
     }
-
-    let score = max(0, breakdown.score)
-    if score < 12 { return "anchor_score_below_threshold" }
-    if topicAlignment == 0, breakdown.consequence == 0, breakdown.contrast == 0, breakdown.decision == 0 {
-        return "no_topic_or_consequence"
-    }
-    if productWorthinessSignals.isEmpty {
-        return "not_product_worthy"
-    }
-    if !hasConsequenceNearby,
-       breakdown.contrast == 0,
-       breakdown.decision == 0,
-       breakdown.novelty == 0,
-       breakdown.concrete < 14 {
-        return "no_consequence_nearby"
+    if isVagueActionRule(lower, concretenessScore: breakdown.concrete, topicAlignment: topicAlignment),
+       Set(productWorthinessSignals).isSubset(of: ["actionable_rule", "decision_point"]) {
+        return "vague_actionable_rule"
     }
     return nil
 }
@@ -1142,6 +1665,7 @@ private func makeAnchorCandidate(
     anchor: ImpactUnit,
     chapters: [VideoChapter],
     topicTerms: Set<String>,
+    contentMode: ContentMode,
     config: MomentRankerConfig
 ) -> MomentCandidate? {
     let startIndex = max(0, range.lowerBound)
@@ -1201,6 +1725,21 @@ private func makeAnchorCandidate(
     )
     let base = min(85, max(0, breakdown.baseScore))
     guard base > 0 else { return nil }
+    let productEvaluation = evaluateProductQuality(
+        text: text,
+        centerSentence: centerSentence,
+        contentMode: contentMode,
+        baseScore: base,
+        productWorthinessSignals: anchor.productWorthinessSignals,
+        topicAlignment: anchor.topicAlignment,
+        numberIsTopicAligned: anchor.numberIsTopicAligned,
+        hasConsequenceNearby: anchor.hasConsequenceNearby,
+        concretenessScore: concreteScore,
+        insightScore: insightScore,
+        selfContainedScore: selfContained,
+        chapterTitle: chapterTitle,
+        startSeconds: first.startSeconds
+    )
 
     let type = candidateType(
         insight: insightScore,
@@ -1242,7 +1781,14 @@ private func makeAnchorCandidate(
         hasConsequenceNearby: anchor.hasConsequenceNearby,
         anchorRejected: false,
         rejectionReason: nil,
-        productWorthinessSignals: anchor.productWorthinessSignals
+        productWorthinessSignals: anchor.productWorthinessSignals,
+        contentMode: contentMode,
+        wouldUserClickScore: productEvaluation.score,
+        usefulnessSignals: productEvaluation.usefulnessSignals,
+        modeSpecificBoosts: productEvaluation.modeSpecificBoosts,
+        modeSpecificPenalties: productEvaluation.modeSpecificPenalties,
+        sponsorDetected: productEvaluation.sponsorDetected,
+        selectedForProduct: productEvaluation.selectedForProduct
     )
 }
 
@@ -1706,6 +2252,7 @@ private func makeCandidate(
     range: ClosedRange<Int>,
     chapters: [VideoChapter],
     topicTerms: Set<String>,
+    contentMode: ContentMode,
     config: MomentRankerConfig
 ) -> MomentCandidate? {
     let refinedRange = refineBoundaryRange(blocks: blocks, range: range, config: config)
@@ -1804,6 +2351,21 @@ private func makeCandidate(
     )
     let base = min(85, max(0, breakdown.baseScore))
     guard base > 0 else { return nil }
+    let productEvaluation = evaluateProductQuality(
+        text: text,
+        centerSentence: nil,
+        contentMode: contentMode,
+        baseScore: base,
+        productWorthinessSignals: productSignals,
+        topicAlignment: topicScore,
+        numberIsTopicAligned: hasNumber ? numberAligned : nil,
+        hasConsequenceNearby: hasConsequence,
+        concretenessScore: concreteScore,
+        insightScore: insightScore,
+        selfContainedScore: selfContained,
+        chapterTitle: chapterTitle,
+        startSeconds: first.startSeconds
+    )
 
     let type = candidateType(
         insight: insightScore,
@@ -1842,7 +2404,14 @@ private func makeCandidate(
         hasConsequenceNearby: hasConsequence,
         anchorRejected: false,
         rejectionReason: nil,
-        productWorthinessSignals: productSignals
+        productWorthinessSignals: productSignals,
+        contentMode: contentMode,
+        wouldUserClickScore: productEvaluation.score,
+        usefulnessSignals: productEvaluation.usefulnessSignals,
+        modeSpecificBoosts: productEvaluation.modeSpecificBoosts,
+        modeSpecificPenalties: productEvaluation.modeSpecificPenalties,
+        sponsorDetected: productEvaluation.sponsorDetected,
+        selectedForProduct: productEvaluation.selectedForProduct
     )
 }
 
@@ -2044,7 +2613,8 @@ private func contextBlockLooksPromotional(_ text: String) -> Bool {
     let phrases = [
         "vanta.com", "workos.com", "works.com", "supporting sponsor",
         "make sure to subscribe", "click the subscribe", "join the new society",
-        "promo code", "use code", "learn more at"
+        "promo code", "use code", "learn more at", "try it risk-free",
+        "abundant mines", "own your machines", "bitcoin you mine"
     ]
     return phrases.contains(where: lower.contains)
 }
@@ -2089,7 +2659,12 @@ private func fillerPenalty(_ text: String) -> Int {
         ("built a full startup", -8),
         ("over 2,000 hours", -8),
         ("my claim is that by the end", -10),
-        ("go ahead below the video", -12)
+        ("go ahead below the video", -12),
+        ("try it risk-free", -24),
+        ("risk-free for 30 days", -24),
+        ("abundant mines", -24),
+        ("own your machines", -20),
+        ("bitcoin you mine", -20)
     ]
     let phrasePenalty = weighted.reduce(0) { total, item in
         total + (text.contains(item.0) ? item.1 : 0)
@@ -2125,6 +2700,11 @@ private func hardLeadInScore(_ text: String) -> Int {
         ("learn in just three weeks", 16),
         ("complete beginner", 10),
         ("top 1% ai developer", 14),
+        ("try it risk-free", 18),
+        ("risk-free for 30 days", 18),
+        ("abundant mines", 18),
+        ("own your machines", 14),
+        ("bitcoin you mine", 14),
     ]
     var score = weighted.reduce(0) { total, item in
         total + (text.contains(item.0) ? item.1 : 0)
@@ -2232,10 +2812,11 @@ private func selectWithDiversity(
     guard !candidates.isEmpty else { return [] }
 
     var pool = candidates.filter {
-        $0.baseScore >= qualityThreshold
-            && !$0.productWorthinessSignals.isEmpty
-            && ($0.anchorScore.map { $0 >= 14 } ?? true)
+        $0.baseScore >= max(0, qualityThreshold - 12)
+            && $0.productSelectionScore >= 48
             && $0.rejectionReason == nil
+            && $0.selectedForProduct
+            && !$0.sponsorDetected
             && passesFinalProductGate($0)
     }
     guard !pool.isEmpty else { return [] }
@@ -2269,7 +2850,7 @@ private func selectWithDiversity(
             }
 
             let diversity = max(0, Int(((1.0 - maxSimilarity) * 15.0).rounded()))
-            let selectionScore = candidate.baseScore
+            let selectionScore = candidate.productSelectionScore
                 + diversity
                 - Int((maxSimilarity * 12.0).rounded())
                 - Int((maxTemporalOverlap * 18.0).rounded())
@@ -2289,35 +2870,24 @@ private func selectWithDiversity(
 }
 
 private func passesFinalProductGate(_ candidate: MomentCandidate) -> Bool {
-    let signals = Set(candidate.productWorthinessSignals)
+    guard candidate.selectedForProduct,
+          candidate.wouldUserClickScore >= 48,
+          !candidate.sponsorDetected else {
+        return false
+    }
+
+    let usefulnessSignals = Set(candidate.usefulnessSignals)
     let hasNumber = candidate.cleanText.range(of: #"\d"#, options: .regularExpression) != nil
     let topicAlignment = candidate.topicAlignment ?? 0
 
     if hasNumber,
        candidate.numberIsTopicAligned == false,
        topicAlignment == 0,
-       signals.isSubset(of: ["consequence", "strong_contrast"]) {
+       usefulnessSignals.isDisjoint(with: ["clear_consequence", "causal_explanation", "decision_or_tradeoff"]) {
         return false
     }
 
-    let strongSignals: Set<String> = [
-        "strong_contrast",
-        "decision_point",
-        "actionable_rule",
-        "surprising_claim",
-        "topic_aligned_number",
-        "topic_aligned_concrete_evidence"
-    ]
-
-    if !signals.isDisjoint(with: strongSignals) {
-        return true
-    }
-
-    guard signals == ["consequence"] else { return false }
-
-    let chapterSpecificity = candidate.chapterSpecificity ?? 0.8
-    return candidate.baseScore >= 54
-        && (topicAlignment >= 8 || chapterSpecificity >= 1.0)
+    return true
 }
 
 private func chapterCounts(for candidates: [MomentCandidate]) -> [String: Int] {

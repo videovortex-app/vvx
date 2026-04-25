@@ -29,6 +29,13 @@ public struct RankedMoment: Codable, Sendable, Equatable {
     public let anchorRejected: Bool?
     public let rejectionReason: String?
     public let productWorthinessSignals: [String]?
+    public let contentMode: String?
+    public let wouldUserClickScore: Int?
+    public let usefulnessSignals: [String]?
+    public let modeSpecificBoosts: [String]?
+    public let modeSpecificPenalties: [String]?
+    public let sponsorDetected: Bool?
+    public let selectedForProduct: Bool?
 
     public init(
         id: String,
@@ -54,7 +61,14 @@ public struct RankedMoment: Codable, Sendable, Equatable {
         hasConsequenceNearby: Bool? = nil,
         anchorRejected: Bool? = nil,
         rejectionReason: String? = nil,
-        productWorthinessSignals: [String]? = nil
+        productWorthinessSignals: [String]? = nil,
+        contentMode: String? = nil,
+        wouldUserClickScore: Int? = nil,
+        usefulnessSignals: [String]? = nil,
+        modeSpecificBoosts: [String]? = nil,
+        modeSpecificPenalties: [String]? = nil,
+        sponsorDetected: Bool? = nil,
+        selectedForProduct: Bool? = nil
     ) {
         self.id             = id
         self.rank           = rank
@@ -80,6 +94,13 @@ public struct RankedMoment: Codable, Sendable, Equatable {
         self.anchorRejected = anchorRejected
         self.rejectionReason = rejectionReason
         self.productWorthinessSignals = productWorthinessSignals
+        self.contentMode = contentMode
+        self.wouldUserClickScore = wouldUserClickScore
+        self.usefulnessSignals = usefulnessSignals
+        self.modeSpecificBoosts = modeSpecificBoosts
+        self.modeSpecificPenalties = modeSpecificPenalties
+        self.sponsorDetected = sponsorDetected
+        self.selectedForProduct = selectedForProduct
     }
 }
 

@@ -228,7 +228,14 @@ private extension DocsCommand {
               "chapterSpecificity": 1.15,
               "numberIsTopicAligned": true,
               "hasConsequenceNearby": true,
-              "productWorthinessSignals": ["consequence", "topic_aligned_number"]
+              "productWorthinessSignals": ["consequence", "topic_aligned_number"],
+              "contentMode": "podcast/interview",
+              "wouldUserClickScore": 84,
+              "usefulnessSignals": ["clear_consequence", "topic_aligned_metric"],
+              "modeSpecificBoosts": ["podcast_decision_or_change"],
+              "modeSpecificPenalties": [],
+              "sponsorDetected": false,
+              "selectedForProduct": true
             }
           ],
           "transcriptPath": "/Users/you/.vvx/transcripts/YouTube/Channel/Title.en.srt",
@@ -251,9 +258,10 @@ private extension DocsCommand {
         vvx moments --from-sense result.json --limit 10 --explain
         ```
 
-        `--explain` includes pre-diversity `momentCandidates` and V7
-        `rejectedAnchors` for gate debugging. Do not model best moments as
-        `search`, `gather`, or `clip`; the primitive is `transcript -> ranked moments`.
+        `--explain` includes pre-diversity `momentCandidates`, V8
+        click-worthiness fields, and `rejectedAnchors` for gate debugging. Do
+        not model best moments as `search`, `gather`, or `clip`; the primitive
+        is `transcript -> ranked moments`.
 
         ### `--metadata-only` mode
         `transcriptBlocks` is empty but `estimatedTokens` and all chapter token counts are
@@ -1552,7 +1560,14 @@ private extension DocsCommand {
                 "hasConsequenceNearby": { "type": ["boolean", "null"] },
                 "anchorRejected": { "type": ["boolean", "null"] },
                 "rejectionReason": { "type": ["string", "null"] },
-                "productWorthinessSignals": { "type": ["array", "null"], "items": { "type": "string" } }
+                "productWorthinessSignals": { "type": ["array", "null"], "items": { "type": "string" } },
+                "contentMode": { "type": ["string", "null"], "enum": ["tutorial/how-to", "podcast/interview", "news/roundup", "documentary", "product/explainer", "unknown", null] },
+                "wouldUserClickScore": { "type": ["integer", "null"], "description": "0-100 V8 product click-worthiness score." },
+                "usefulnessSignals": { "type": ["array", "null"], "items": { "type": "string" } },
+                "modeSpecificBoosts": { "type": ["array", "null"], "items": { "type": "string" } },
+                "modeSpecificPenalties": { "type": ["array", "null"], "items": { "type": "string" } },
+                "sponsorDetected": { "type": ["boolean", "null"] },
+                "selectedForProduct": { "type": ["boolean", "null"] }
               }
             },
             "SenseResult": {

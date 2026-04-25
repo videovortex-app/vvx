@@ -89,7 +89,14 @@ vvx <url>                               # shorthand (sense is the default)
         "qualityPenalty": -2,
         "mmrDiversity": 14
       },
-      "whySelected": ["contains insight language", "distinct from other selected moments"]
+      "whySelected": ["contains insight language", "distinct from other selected moments"],
+      "contentMode": "podcast/interview",
+      "wouldUserClickScore": 84,
+      "usefulnessSignals": ["clear_consequence", "topic_aligned_metric"],
+      "modeSpecificBoosts": ["podcast_decision_or_change"],
+      "modeSpecificPenalties": [],
+      "sponsorDetected": false,
+      "selectedForProduct": true
     }
   ],
   "transcriptPath": "/Users/you/.vvx/transcripts/YouTube/Channel/Title.en.srt",
@@ -112,8 +119,9 @@ Debug/eval path:
 vvx moments --from-sense result.json --limit 10 --explain
 ```
 
-`--explain` includes pre-diversity `momentCandidates`. Do not model best moments
-as `search`, `gather`, or `clip`; the primitive is `transcript -> ranked moments`.
+`--explain` includes pre-diversity `momentCandidates`, V8 click-worthiness
+fields, and `rejectedAnchors` for gate debugging. Do not model best moments as
+`search`, `gather`, or `clip`; the primitive is `transcript -> ranked moments`.
 
 ### `--metadata-only` mode
 `transcriptBlocks` is empty but `estimatedTokens` and all chapter token counts are
