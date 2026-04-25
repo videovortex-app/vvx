@@ -120,6 +120,16 @@ struct SenseCommand: AsyncParsableCommand {
             URL(fileURLWithPath: $0).standardizedFileURL
         } ?? config.resolvedTranscriptDirectory()
 
+        let cacheStart = Date()
+        if let cached = await cachedSenseResult(url: url) {
+            CLIOutputFormatter.senseCacheHit(
+                elapsed: Date().timeIntervalSince(cacheStart),
+                transcriptPath: cached.transcriptPath
+            )
+            printOutput(from: cached, isSlicing: isSlicing, parsedStart: parsedStart, parsedEnd: parsedEnd)
+            return
+        }
+
         let resolver = EngineResolver.cliResolver
         guard let ytDlpURL = resolver.resolvedYtDlpURL() else {
             CLIOutputFormatter.engineNotFound()
@@ -160,35 +170,7 @@ struct SenseCommand: AsyncParsableCommand {
                                              transcriptPath: result.transcriptPath)
 
                 // Apply slice to the stdout payload (DB is already written with full data).
-                var outputResult = isSlicing
-                    ? result.sliced(startSeconds: parsedStart, endSeconds: parsedEnd)
-                    : result
-
-                if moments && !transcript && !markdown {
-                    let ranked = MomentRanker.rankedMoments(for: outputResult, limit: momentLimit)
-                    outputResult = outputResult.withRankedMoments(ranked)
-                }
-
-                if transcript {
-                    // --transcript outputs raw text; slicing applies via transcriptBlocks.
-                    if !outputResult.transcriptBlocks.isEmpty {
-                        print(outputResult.transcriptBlocks.map(\.text).joined(separator: " "))
-                    } else if !isSlicing, let text = result.transcriptText() {
-                        // Fallback to raw SRT only for unsliced mode (file may contain
-                        // more than the slice, so skip the fallback when slicing is active).
-                        print(SenseResult.stripSRTTimestamps(text))
-                    } else {
-                        fputs("No transcript available.\n", stderr)
-                    }
-                } else if markdown {
-                    // markdownDocument() reads self.transcriptBlocks — naturally slice-local.
-                    print(outputResult.markdownDocument())
-                } else {
-                    // Apply metadata-only stripping AFTER slicing so planning fields
-                    // (estimatedTokens, chapter tokens) reflect the slice, not the full video.
-                    let output = metadataOnly ? outputResult.withEmptyBlocks() : outputResult
-                    print(output.jsonString())
-                }
+                printOutput(from: result, isSlicing: isSlicing, parsedStart: parsedStart, parsedEnd: parsedEnd)
 
             case .retrying:
                 CLIOutputFormatter.retrying()
@@ -202,6 +184,57 @@ struct SenseCommand: AsyncParsableCommand {
             @unknown default:
                 break
             }
+        }
+    }
+
+    private func cachedSenseResult(url: String) async -> SenseResult? {
+        do {
+            let db = try VortexDB.open()
+            return try await db.senseResultFromCache(videoId: url)
+        } catch {
+            return nil
+        }
+    }
+
+    private func printOutput(
+        from result: SenseResult,
+        isSlicing: Bool,
+        parsedStart: Double,
+        parsedEnd: Double
+    ) {
+        var outputResult = isSlicing
+            ? result.sliced(startSeconds: parsedStart, endSeconds: parsedEnd)
+            : result
+
+        if moments && !transcript && !markdown {
+            let rankStart = Date()
+            let ranked = MomentRanker.rankedMoments(for: outputResult, limit: momentLimit)
+            CLIOutputFormatter.momentsRanked(
+                count: ranked.count,
+                elapsed: Date().timeIntervalSince(rankStart)
+            )
+            outputResult = outputResult.withRankedMoments(ranked)
+        }
+
+        if transcript {
+            // --transcript outputs raw text; slicing applies via transcriptBlocks.
+            if !outputResult.transcriptBlocks.isEmpty {
+                print(outputResult.transcriptBlocks.map(\.text).joined(separator: " "))
+            } else if !isSlicing, let text = result.transcriptText() {
+                // Fallback to raw SRT only for unsliced mode (file may contain
+                // more than the slice, so skip the fallback when slicing is active).
+                print(SenseResult.stripSRTTimestamps(text))
+            } else {
+                fputs("No transcript available.\n", stderr)
+            }
+        } else if markdown {
+            // markdownDocument() reads self.transcriptBlocks — naturally slice-local.
+            print(outputResult.markdownDocument())
+        } else {
+            // Apply metadata-only stripping AFTER slicing so planning fields
+            // (estimatedTokens, chapter tokens) reflect the slice, not the full video.
+            let output = metadataOnly ? outputResult.withEmptyBlocks() : outputResult
+            print(output.jsonString())
         }
     }
 }

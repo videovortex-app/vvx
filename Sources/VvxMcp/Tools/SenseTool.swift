@@ -71,6 +71,18 @@ enum SenseTool {
 
         let isSliced = startStr != nil || endStr != nil
 
+        if let cached = await cachedSenseResult(url: url) {
+            log("sense: vortex.db cache hit \(url)")
+            return format(result: cached,
+                          outputFormat: outputFormat,
+                          metadataOnly: metadataOnly,
+                          moments: moments,
+                          momentLimit: momentLimit,
+                          isSliced: isSliced,
+                          parsedStart: parsedStart,
+                          parsedEnd: parsedEnd)
+        }
+
         let resolver = EngineResolver.cliResolver
         guard let ytDlpURL = resolver.resolvedYtDlpURL() else {
             let err = VvxError(code: .engineNotFound,
@@ -124,6 +136,15 @@ enum SenseTool {
                       isSliced: isSliced,
                       parsedStart: parsedStart,
                       parsedEnd: parsedEnd)
+    }
+
+    private static func cachedSenseResult(url: String) async -> SenseResult? {
+        do {
+            let db = try VortexDB.open()
+            return try await db.senseResultFromCache(videoId: url)
+        } catch {
+            return nil
+        }
     }
 
     // MARK: - Output formatting

@@ -174,6 +174,58 @@ struct VortexDBTests {
         #expect(stored[1].text == "Second subtitle.")
     }
 
+    @Test("senseResultFromCache reconstructs metadata and transcript blocks")
+    func testSenseResultFromCache() async throws {
+        let (db, url) = try await makeDB()
+        defer { cleanup(url) }
+
+        let videoId = "https://youtube.com/watch?v=cached"
+        try await db.upsertVideo(VideoRecord(
+            id:              videoId,
+            title:           "Cached Video",
+            platform:        "YouTube",
+            uploader:        "Test Channel",
+            durationSeconds: 120,
+            uploadDate:      "2026-04-25",
+            transcriptPath:  "/tmp/cached.en-orig.srt",
+            sensedAt:        "2026-04-25T12:00:00Z",
+            viewCount:       1000,
+            likeCount:       99,
+            commentCount:    7,
+            description:     "Stored description",
+            chapters: [
+                VideoChapter(title: "Setup", startTime: 0, endTime: 60, estimatedTokens: 8),
+                VideoChapter(title: "Payoff", startTime: 60, endTime: 120, estimatedTokens: 6),
+            ]
+        ))
+
+        let blocks = [
+            SRTBlock(index: 1, startTime: "00:00:01,000", endTime: "00:00:04,000",
+                     startSeconds: 1.0, endSeconds: 4.0, text: "Cached transcript block."),
+            SRTBlock(index: 2, startTime: "00:01:01,000", endTime: "00:01:04,000",
+                     startSeconds: 61.0, endSeconds: 64.0, text: "Second cached block."),
+        ]
+        try await db.upsertBlocks(
+            blocks,
+            videoId: videoId,
+            title: "Cached Video",
+            platform: "YouTube",
+            uploader: "Test Channel",
+            chapterIndices: [0, 1]
+        )
+
+        let cached = try await db.senseResultFromCache(videoId: videoId)
+
+        #expect(cached?.url == videoId)
+        #expect(cached?.title == "Cached Video")
+        #expect(cached?.uploader == "Test Channel")
+        #expect(cached?.transcriptLanguage == "en")
+        #expect(cached?.transcriptBlocks.count == 2)
+        #expect(cached?.transcriptBlocks[1].chapterIndex == 1)
+        #expect(cached?.rankedMoments == nil)
+        #expect(cached?.viewCount == 1000)
+    }
+
     @Test("upsertBlocks replaces old blocks on re-index")
     func testUpsertBlocksReplaces() async throws {
         let (db, url) = try await makeDB()

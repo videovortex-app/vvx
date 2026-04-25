@@ -15,9 +15,29 @@ private func makeFakeYtDlpFixture() throws -> (tempDir: URL, ytDlpURL: URL) {
     let script = """
     #!/usr/bin/env bash
     set -euo pipefail
+    has_no_simulate=0
     for arg in "$@"; do
       case "$arg" in
+        --no-simulate) has_no_simulate=1 ;;
         *timeout_test_url*) exec sleep 10 ;;
+      esac
+    done
+    for arg in "$@"; do
+      case "$arg" in
+        *subtitle_test_url*)
+          if [[ "$has_no_simulate" != "1" ]]; then
+            echo "missing --no-simulate" >&2
+            exit 42
+          fi
+          mkdir -p youtube/tester
+          cat > youtube/tester/dummy.en.srt <<'SRT'
+    1
+    00:00:00,000 --> 00:00:01,000
+    Hello transcript.
+    SRT
+          printf '%s\\n' '{"title":"dummy","extractor_key":"youtube","automatic_captions":{"en":[{"ext":"vtt"}]}}'
+          exit 0
+          ;;
       esac
     done
     line='{"title":"dummy","extractor_key":"youtube"}'
@@ -98,6 +118,35 @@ struct VideoSenserIntegrationTests {
         #expect(result.success)
         #expect(result.title == "dummy")
         #expect(result.platform == "YouTube")
+    }
+
+    @Test("Sense uses non-simulated dump-json so subtitles are written")
+    func dumpJsonAllowsSubtitleWrites() async throws {
+        let (tempDir, fakeYtDlp) = try makeFakeYtDlpFixture()
+        defer { try? FileManager.default.removeItem(at: tempDir) }
+
+        let config = SenseConfig(
+            url: "https://example.com/subtitle_test_url",
+            outputDirectory: tempDir.appendingPathComponent("out", isDirectory: true),
+            ytDlpPath: fakeYtDlp,
+            timeoutSeconds: 120
+        )
+
+        let senser = VideoSenser()
+        let termination = await collectSenseTermination(from: senser, config: config)
+
+        guard case .completed(let result) = termination else {
+            if case .failed(let err) = termination {
+                Issue.record("Expected completion, got failure: \(err.message) detail: \(err.detail ?? "")")
+            } else {
+                Issue.record("Expected completion, got no terminal event")
+            }
+            return
+        }
+
+        #expect(result.transcriptSource == .auto)
+        #expect(result.transcriptLanguage == "en")
+        #expect(result.transcriptBlocks.map(\.text) == ["Hello transcript."])
     }
 
     @Test("Timeout: slow fake yields failed with timed-out detail")

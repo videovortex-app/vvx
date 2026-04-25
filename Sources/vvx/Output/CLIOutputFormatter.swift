@@ -29,6 +29,21 @@ public enum CLIOutputFormatter {
         }
     }
 
+    public static func senseCacheHit(elapsed: TimeInterval, transcriptPath: String?) {
+        let secs = String(format: "%.3f", elapsed)
+        if let path = transcriptPath {
+            let display = path.replacingOccurrences(of: NSHomeDirectory(), with: "~")
+            fputs("✓ vortex.db cache hit in \(secs)s — transcript at \(display)\n", stderr)
+        } else {
+            fputs("✓ vortex.db cache hit in \(secs)s — no transcript path stored\n", stderr)
+        }
+    }
+
+    public static func momentsRanked(count: Int, elapsed: TimeInterval) {
+        let secs = String(format: "%.3f", elapsed)
+        fputs("  • Ranked \(count) moment\(count == 1 ? "" : "s") in \(secs)s\n", stderr)
+    }
+
     public static func senseFailed(_ message: String) {
         fputs("✗ Sense failed: \(message)\n", stderr)
     }

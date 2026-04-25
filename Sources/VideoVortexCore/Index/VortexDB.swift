@@ -664,6 +664,88 @@ public actor VortexDB {
         }
     }
 
+    /// Load a single video metadata row by canonical URL.
+    public func video(id: String) throws -> VideoRecord? {
+        let sql = """
+            SELECT id, title, platform, uploader, upload_date, duration_seconds,
+                   transcript_path, video_path, sensed_at, archived_at,
+                   tags, view_count, like_count, comment_count, description, chapters
+            FROM videos
+            WHERE id = ?
+            LIMIT 1;
+            """
+
+        return try dbPrepare(db, sql) { stmt in
+            sqlite3_bind_text(stmt, 1, id, -1, SQLITE_TRANSIENT)
+            guard sqlite3_step(stmt) == SQLITE_ROW else { return nil }
+            return VideoRecord(
+                id:              dbColumnText(stmt, 0)   ?? "",
+                title:           dbColumnText(stmt, 1)   ?? "",
+                platform:        dbColumnText(stmt, 2),
+                uploader:        dbColumnText(stmt, 3),
+                durationSeconds: dbColumnOptInt(stmt, 5),
+                uploadDate:      dbColumnText(stmt, 4),
+                transcriptPath:  dbColumnText(stmt, 6),
+                videoPath:       dbColumnText(stmt, 7),
+                sensedAt:        dbColumnText(stmt, 8)   ?? "",
+                archivedAt:      dbColumnText(stmt, 9),
+                tags:            dbParseTags(dbColumnText(stmt, 10)),
+                viewCount:       dbColumnOptInt(stmt, 11),
+                likeCount:       dbColumnOptInt(stmt, 12),
+                commentCount:    dbColumnOptInt(stmt, 13),
+                description:     dbColumnText(stmt, 14),
+                chapters:        dbParseChapters(dbColumnText(stmt, 15))
+            )
+        }
+    }
+
+    /// Reconstruct a `SenseResult` from stored video metadata + transcript blocks.
+    ///
+    /// This is the read-through cache path for `vvx sense`: ranked moments are never
+    /// persisted, but the raw video-understanding substrate is, so newer rankers can
+    /// re-run instantly without calling yt-dlp.
+    public func senseResultFromCache(videoId: String) throws -> SenseResult? {
+        guard let record = try video(id: videoId) else { return nil }
+        let storedBlocks = try blocksForVideo(videoId: record.id)
+        guard !storedBlocks.isEmpty else { return nil }
+
+        let transcriptBlocks = storedBlocks.enumerated().map { offset, block in
+            let words = block.text.split { $0.isWhitespace }.count
+            return TranscriptBlock(
+                index:           offset + 1,
+                startSeconds:    block.startSeconds,
+                endSeconds:      block.endSeconds,
+                text:            block.text,
+                wordCount:       words,
+                estimatedTokens: Int((Double(words) * 1.3).rounded()),
+                chapterIndex:    block.chapterIndex
+            )
+        }
+        let estimatedTokens = transcriptBlocks.map(\.estimatedTokens).reduce(0, +)
+
+        return SenseResult(
+            url:                  record.id,
+            title:                record.title,
+            platform:             record.platform,
+            uploader:             record.uploader,
+            durationSeconds:      record.durationSeconds,
+            uploadDate:           record.uploadDate,
+            description:          record.description,
+            descriptionTruncated: false,
+            tags:                 record.tags,
+            viewCount:            record.viewCount,
+            likeCount:            record.likeCount,
+            commentCount:         record.commentCount,
+            transcriptPath:       record.transcriptPath,
+            transcriptLanguage:   Self.transcriptLanguage(fromPath: record.transcriptPath),
+            transcriptSource:     .unknown,
+            transcriptBlocks:     transcriptBlocks,
+            estimatedTokens:      estimatedTokens,
+            chapters:             record.chapters,
+            completedAt:          Self.date(fromISO8601: record.sensedAt) ?? .now
+        )
+    }
+
     /// Number of FTS rows in `transcript_blocks` for `videoId` (canonical URL).
     /// Used to avoid wiping fetch-indexed transcripts when sense returns no blocks.
     public func transcriptBlockCount(forVideoId videoId: String) throws -> Int {
@@ -1097,6 +1179,19 @@ public actor VortexDB {
     func srtTimestampToSeconds(_ ts: String) -> Double {
         let normalised = ts.replacingOccurrences(of: ",", with: ".")
         return TimeParser.parseToSeconds(normalised) ?? 0.0
+    }
+
+    private static func transcriptLanguage(fromPath path: String?) -> String? {
+        guard let path else { return nil }
+        let name = URL(fileURLWithPath: path).lastPathComponent
+        let parts = name.split(separator: ".").map(String.init)
+        guard parts.count >= 3 else { return nil }
+        let raw = parts[parts.count - 2]
+        return raw.split(separator: "-").first.map(String.init)
+    }
+
+    private static func date(fromISO8601 string: String) -> Date? {
+        ISO8601DateFormatter().date(from: string)
     }
 
     /// Return `CREATE TABLE` / `CREATE VIRTUAL TABLE` SQL for all tables in the database.

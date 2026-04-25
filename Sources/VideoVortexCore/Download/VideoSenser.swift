@@ -231,6 +231,7 @@ public final class VideoSenser: Sendable {
             : YtDlpRateLimit.defaultSubLangs
         args.append(contentsOf: [
             "--dump-json",
+            "--no-simulate",
             "--write-auto-subs",
             "--write-subs",
             "--sub-langs", subLangs,
