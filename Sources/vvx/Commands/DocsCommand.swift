@@ -317,13 +317,19 @@ private extension DocsCommand {
         Debug/eval path:
         ```
         vvx moments --from-sense result.json --limit 10 --explain
+        vvx moments --from-sense result.json --query "local AI" --limit 10 --explain
         ```
 
         Output includes `rankedMoments`. With `--explain`, output also includes
         pre-diversity `momentCandidates` and `rejectedAnchors` for gate debugging.
+        With `--query`, `moments` does not filter global moments; it searches the
+        full transcript, builds fresh query-specific windows, and returns
+        query-scored `rankedMoments` plus `queryCandidates`,
+        `rejectedQueryAnchors`, and `dedupedOverlaps`.
 
-        This is not search, gather, or clip extraction. It maps one transcript to
-        ranked moments.
+        This is not archive search, gather, or clip extraction. It maps one
+        transcript to ranked moments, or one query plus one transcript to query
+        moments.
         """
     }
 }

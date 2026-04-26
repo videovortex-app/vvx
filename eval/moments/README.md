@@ -15,4 +15,11 @@ scripts/eval_moments.sh eval/moments/validation_urls.txt
 scripts/eval_moments.sh eval/moments/holdout_urls.txt
 ```
 
+Query moments use fixed per-video queries from `query_eval.tsv` and cached
+`*.sense.json` files:
+
+```bash
+scripts/eval_query_moments.sh eval/moments/query_eval.tsv /tmp/vvx-moment-eval-validation_urls-... /tmp/vvx-moment-eval-holdout_urls-...
+```
+
 The runner writes JSON, timings, and a raw Markdown report under `/tmp`.

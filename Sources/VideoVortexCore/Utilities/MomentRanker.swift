@@ -124,6 +124,112 @@ public enum MomentRanker {
     ) -> [RankedMoment] {
         rank(result: result, config: MomentRankerConfig(limit: limit)).rankedMoments
     }
+
+    public static func rankQuery(
+        result: SenseResult,
+        query: String,
+        config: MomentRankerConfig = MomentRankerConfig()
+    ) -> QueryMomentRankingResult {
+        let trimmedQuery = query.trimmingCharacters(in: .whitespacesAndNewlines)
+        guard let parsedQuery = parseMomentQuery(trimmedQuery) else {
+            return QueryMomentRankingResult(
+                sourceTitle: result.title,
+                sourceURL: result.url,
+                query: trimmedQuery,
+                queryStrength: .weak,
+                noResultReason: "empty_query",
+                rankedMoments: [],
+                queryCandidates: config.includeCandidates ? [] : nil,
+                rejectedQueryAnchors: config.includeCandidates ? [] : nil,
+                dedupedOverlaps: config.includeCandidates ? [] : nil
+            )
+        }
+
+        let blocks = result.transcriptBlocks
+            .filter { !$0.text.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty }
+            .sorted { $0.startSeconds < $1.startSeconds }
+
+        guard !blocks.isEmpty else {
+            return QueryMomentRankingResult(
+                sourceTitle: result.title,
+                sourceURL: result.url,
+                query: trimmedQuery,
+                queryStrength: .weak,
+                noResultReason: "no_transcript_blocks",
+                rankedMoments: [],
+                queryCandidates: config.includeCandidates ? [] : nil,
+                rejectedQueryAnchors: config.includeCandidates ? [] : nil,
+                dedupedOverlaps: config.includeCandidates ? [] : nil
+            )
+        }
+
+        let metadataTopicTerms = extractKeywords(
+            ([result.title, result.description ?? ""] + result.tags + result.chapters.map(\.title))
+                .joined(separator: " ")
+        )
+        let topicTerms = metadataTopicTerms.union(dominantTranscriptTerms(blocks))
+        let contentMode = detectContentMode(result: result, blocks: blocks)
+
+        let generated = generateQueryCandidates(
+            blocks: blocks,
+            chapters: result.chapters,
+            sourceURL: result.url,
+            parsedQuery: parsedQuery,
+            topicTerms: topicTerms,
+            contentMode: contentMode,
+            config: queryMomentConfig(from: config)
+        )
+
+        let sortedCandidates = generated.candidates.sorted {
+            if $0.combinedScore != $1.combinedScore { return $0.combinedScore > $1.combinedScore }
+            if $0.queryMatch.score != $1.queryMatch.score { return $0.queryMatch.score > $1.queryMatch.score }
+            return $0.candidate.startSeconds < $1.candidate.startSeconds
+        }
+
+        let debugCandidates = sortedCandidates
+            .prefix(config.maxCandidateCount)
+            .enumerated()
+            .map { idx, candidate in
+                candidate.asMoment(rank: idx + 1, idPrefix: "qc", diversityBonus: 0)
+            }
+
+        let selected = selectQueryMoments(
+            candidates: sortedCandidates,
+            limit: config.limit
+        )
+
+        let rankedMoments = selected.selected.enumerated().map { idx, selectedCandidate in
+            selectedCandidate.candidate.asMoment(
+                rank: idx + 1,
+                idPrefix: "q",
+                diversityBonus: selectedCandidate.diversityBonus,
+                extraWhy: selectedCandidate.diversityBonus >= 6 ? ["distinct from other query matches"] : []
+            )
+        }
+
+        let noResultReason: String?
+        if rankedMoments.isEmpty {
+            if generated.sawQueryMatch {
+                noResultReason = "no_useful_query_moment"
+            } else {
+                noResultReason = "no_query_match"
+            }
+        } else {
+            noResultReason = nil
+        }
+
+        return QueryMomentRankingResult(
+            sourceTitle: result.title,
+            sourceURL: result.url,
+            query: trimmedQuery,
+            queryStrength: rankedMoments.isEmpty ? .weak : aggregateQueryStrength(rankedMoments),
+            noResultReason: noResultReason,
+            rankedMoments: rankedMoments,
+            queryCandidates: config.includeCandidates ? Array(debugCandidates) : nil,
+            rejectedQueryAnchors: config.includeCandidates ? generated.rejectedAnchors : nil,
+            dedupedOverlaps: config.includeCandidates ? selected.dedupedOverlaps : nil
+        )
+    }
 }
 
 // MARK: - Candidate generation
@@ -255,6 +361,127 @@ private struct PayoffAnchor {
     let numberIsTopicAligned: Bool
     let hasConsequenceNearby: Bool
     let productWorthinessSignals: [String]
+}
+
+private struct ParsedMomentQuery {
+    let raw: String
+    let normalized: String
+    let terms: [String]
+    let termVariants: [String: Set<String>]
+    let phrases: [String]
+}
+
+private struct QueryMatchEvaluation {
+    let score: Int
+    let matchedTerms: [String]
+    let exactPhrase: Bool
+    let allTermsMatched: Bool
+    let proximity: Int?
+    let reasons: [String]
+}
+
+private struct QueryIntentEvaluation {
+    let score: Int
+    let signals: [String]
+    let reasons: [String]
+}
+
+private struct QueryMomentCandidate {
+    let candidate: MomentCandidate
+    let queryMatch: QueryMatchEvaluation
+    let queryIntent: QueryIntentEvaluation
+    let momentQualityScore: Int
+    let boundaryQualityScore: Int
+    let combinedScore: Int
+    let queryStrength: QueryMomentStrength
+    let videoURLAtTime: String?
+
+    func asMoment(
+        rank: Int,
+        idPrefix: String,
+        diversityBonus: Int,
+        extraWhy: [String] = []
+    ) -> RankedMoment {
+        let diversity = max(0, min(10, diversityBonus))
+        let finalCombined = min(100, max(0, combinedScore + diversity))
+        let finalBreakdown = candidate.breakdown.withMMRDiversity(diversity)
+        let queryBreakdown = QueryMomentScoreBreakdown(
+            queryMatch: queryMatch.score,
+            queryIntent: queryIntent.score,
+            momentQuality: momentQualityScore,
+            boundaryQuality: boundaryQualityScore,
+            diversity: diversity,
+            combined: finalCombined
+        )
+        let queryWhy = queryMatch.reasons
+            + queryIntent.reasons
+            + (boundaryQualityScore >= 70 ? ["clean query moment boundaries"] : [])
+            + (momentQualityScore >= 70 ? ["strong moment quality around query"] : [])
+
+        return RankedMoment(
+            id: "\(idPrefix)\(rank)",
+            rank: rank,
+            startSeconds: roundTime(candidate.startSeconds),
+            endSeconds: roundTime(candidate.endSeconds),
+            durationSeconds: roundTime(candidate.durationSeconds),
+            titleHint: candidate.titleHint,
+            cleanText: candidate.cleanText,
+            score: finalCombined,
+            candidateType: candidate.candidateType,
+            confidence: roundConfidence(Double(finalCombined) / 100.0),
+            chapterTitle: candidate.chapterTitle,
+            chapterIndex: candidate.chapterIndex,
+            scoreBreakdown: finalBreakdown,
+            whySelected: Array((queryWhy + candidate.why + extraWhy).prefix(7)),
+            centerSentence: candidate.centerSentence,
+            anchorScore: candidate.anchorScore,
+            anchorBreakdown: candidate.anchorBreakdown,
+            topicAlignment: candidate.topicAlignment,
+            chapterSpecificity: candidate.chapterSpecificity.map(roundConfidence),
+            numberIsTopicAligned: candidate.numberIsTopicAligned,
+            hasConsequenceNearby: candidate.hasConsequenceNearby,
+            anchorRejected: candidate.anchorRejected,
+            rejectionReason: candidate.rejectionReason,
+            productWorthinessSignals: candidate.productWorthinessSignals.isEmpty ? nil : candidate.productWorthinessSignals,
+            contentMode: candidate.contentMode.rawValue,
+            wouldUserClickScore: momentQualityScore,
+            clickScoreRaw: candidate.clickScoreRaw,
+            clickScoreFinal: momentQualityScore,
+            scoreCapApplied: candidate.scoreCapApplied,
+            scoreCapReason: candidate.scoreCapReason,
+            usefulnessSignals: candidate.usefulnessSignals.isEmpty ? nil : candidate.usefulnessSignals,
+            modeSpecificBoosts: candidate.modeSpecificBoosts.isEmpty ? nil : candidate.modeSpecificBoosts,
+            modeSpecificPenalties: candidate.modeSpecificPenalties.isEmpty ? nil : candidate.modeSpecificPenalties,
+            sponsorDetected: candidate.sponsorDetected,
+            selectedForProduct: queryStrength != .weak && finalCombined >= 75 && rank <= 5,
+            queryStrength: queryStrength.rawValue,
+            matchedTerms: queryMatch.matchedTerms,
+            queryMatchScore: queryMatch.score,
+            queryIntentScore: queryIntent.score,
+            queryIntentSignals: queryIntent.signals.isEmpty ? nil : queryIntent.signals,
+            momentQualityScore: momentQualityScore,
+            boundaryQualityScore: boundaryQualityScore,
+            combinedScore: finalCombined,
+            queryScoreBreakdown: queryBreakdown,
+            videoURLAtTime: videoURLAtTime
+        )
+    }
+}
+
+private struct QueryCandidateGenerationResult {
+    let candidates: [QueryMomentCandidate]
+    let rejectedAnchors: [RejectedQueryAnchor]
+    let sawQueryMatch: Bool
+}
+
+private struct SelectedQueryCandidate {
+    let candidate: QueryMomentCandidate
+    let diversityBonus: Int
+}
+
+private struct QuerySelectionResult {
+    let selected: [SelectedQueryCandidate]
+    let dedupedOverlaps: [DedupedQueryOverlap]
 }
 
 private struct CandidateGenerationResult {
@@ -710,6 +937,527 @@ private func generateAnchorCandidates(
     return CandidateGenerationResult(
         candidates: candidates,
         rejectedAnchors: Array(rejectedAnchors.prefix(config.maxCandidateCount))
+    )
+}
+
+private func queryMomentConfig(from config: MomentRankerConfig) -> MomentRankerConfig {
+    MomentRankerConfig(
+        limit: config.limit,
+        includeCandidates: config.includeCandidates,
+        minDurationSeconds: min(config.minDurationSeconds, 18.0),
+        targetDurationSeconds: min(config.targetDurationSeconds, 42.0),
+        maxDurationSeconds: min(config.maxDurationSeconds, 58.0),
+        strideSeconds: config.strideSeconds,
+        qualityThreshold: max(20, config.qualityThreshold - 12),
+        maxCandidateCount: max(config.maxCandidateCount, max(50, config.limit * 10))
+    )
+}
+
+private func generateQueryCandidates(
+    blocks: [TranscriptBlock],
+    chapters: [VideoChapter],
+    sourceURL: String,
+    parsedQuery: ParsedMomentQuery,
+    topicTerms: Set<String>,
+    contentMode: ContentMode,
+    config: MomentRankerConfig
+) -> QueryCandidateGenerationResult {
+    let units = buildImpactUnits(
+        blocks: blocks,
+        chapters: chapters,
+        topicTerms: topicTerms,
+        contentMode: contentMode
+    )
+    guard !units.isEmpty else {
+        return QueryCandidateGenerationResult(candidates: [], rejectedAnchors: [], sawQueryMatch: false)
+    }
+
+    let scoredAnchors = units.compactMap { unit -> (unit: ImpactUnit, match: QueryMatchEvaluation)? in
+        let chapterTitle = unit.chapterIndex.flatMap { chapters.indices.contains($0) ? chapters[$0].title : nil }
+        let match = evaluateQueryMatch(text: unit.text, chapterTitle: chapterTitle, parsedQuery: parsedQuery)
+        guard match.score > 0 else { return nil }
+        return (unit, match)
+    }
+    let sawQueryMatch = !scoredAnchors.isEmpty
+
+    let anchorBudget = min(scoredAnchors.count, max(50, config.limit * 12))
+    let anchors = scoredAnchors
+        .sorted {
+            if $0.match.score != $1.match.score { return $0.match.score > $1.match.score }
+            if $0.unit.anchorScore != $1.unit.anchorScore { return $0.unit.anchorScore > $1.unit.anchorScore }
+            return $0.unit.startSeconds < $1.unit.startSeconds
+        }
+        .prefix(anchorBudget)
+
+    var candidates: [QueryMomentCandidate] = []
+    var rejectedAnchors: [RejectedQueryAnchor] = []
+
+    for item in anchors {
+        let anchor = item.unit
+        let match = item.match
+        let chapterTitle = anchor.chapterIndex.flatMap { chapters.indices.contains($0) ? chapters[$0].title : nil }
+
+        if let reason = queryAnchorHardRejection(anchor.text, chapterTitle: chapterTitle) {
+            rejectedAnchors.append(
+                rejectedQueryAnchor(
+                    anchor,
+                    match: match,
+                    chapters: chapters,
+                    id: "qr\(rejectedAnchors.count + 1)",
+                    reason: reason
+                )
+            )
+            continue
+        }
+
+        let range = expandAnchorWindow(
+            units: units,
+            anchorIndex: anchor.index,
+            config: config
+        )
+        let built = makeQueryCandidate(
+            units: units,
+            range: range,
+            anchor: anchor,
+            anchorMatch: match,
+            chapters: chapters,
+            sourceURL: sourceURL,
+            parsedQuery: parsedQuery,
+            topicTerms: topicTerms,
+            contentMode: contentMode,
+            config: config
+        )
+
+        if let candidate = built.candidate {
+            candidates.append(candidate)
+        } else {
+            rejectedAnchors.append(
+                rejectedQueryAnchor(
+                    anchor,
+                    match: match,
+                    chapters: chapters,
+                    id: "qr\(rejectedAnchors.count + 1)",
+                    reason: built.rejectionReason ?? "weak_or_dirty_query_window"
+                )
+            )
+        }
+    }
+
+    return QueryCandidateGenerationResult(
+        candidates: candidates,
+        rejectedAnchors: Array(rejectedAnchors.prefix(config.maxCandidateCount)),
+        sawQueryMatch: sawQueryMatch
+    )
+}
+
+private func makeQueryCandidate(
+    units: [ImpactUnit],
+    range: ClosedRange<Int>,
+    anchor: ImpactUnit,
+    anchorMatch: QueryMatchEvaluation,
+    chapters: [VideoChapter],
+    sourceURL: String,
+    parsedQuery: ParsedMomentQuery,
+    topicTerms: Set<String>,
+    contentMode: ContentMode,
+    config: MomentRankerConfig
+) -> (candidate: QueryMomentCandidate?, rejectionReason: String?) {
+    let startIndex = max(0, range.lowerBound)
+    let endIndex = min(units.count - 1, range.upperBound)
+    guard startIndex <= endIndex else { return (nil, "invalid_query_window") }
+
+    var windowUnits = trimPromotionalLeadInUnits(
+        Array(units[startIndex ... endIndex]),
+        anchorIndex: anchor.index
+    )
+    windowUnits = trimDirtyLeadInUnits(
+        windowUnits,
+        anchorIndex: anchor.index
+    )
+    guard windowUnits.first != nil, windowUnits.last != nil else {
+        return (nil, "empty_query_window")
+    }
+
+    var rawText = stitchTextSegments(windowUnits.map(\.text))
+    var text = finalizeMomentText(rawText)
+    guard !text.isEmpty else { return (nil, "empty_query_text") }
+
+    var words = wordCount(text)
+    guard words >= 10 else { return (nil, "weak_transcript_fragment") }
+
+    let chapterContext = resolveChapterContext(
+        startSeconds: anchor.startSeconds,
+        preferredIndex: anchor.chapterIndex,
+        chapters: chapters
+    )
+    let chapterIndex = chapterContext.index
+    let chapterTitle = chapterContext.title
+    var lower = text.lowercased()
+
+    if let reason = queryAnchorHardRejection(text, chapterTitle: chapterTitle) {
+        return (nil, reason)
+    }
+    guard !isHardRejectedLeadIn(text: rawText.lowercased(), chapterTitle: chapterTitle),
+          !isHardRejectedLeadIn(text: lower, chapterTitle: chapterTitle) else {
+        return (nil, "sponsor_or_admin_meta")
+    }
+
+    var windowMatch = evaluateQueryMatch(text: text, chapterTitle: chapterTitle, parsedQuery: parsedQuery)
+    var queryMatch = windowMatch.score >= anchorMatch.score ? windowMatch : anchorMatch
+    guard queryMatch.score > 0 else { return (nil, "window_lost_query_match") }
+
+    var center = bestQueryCenter(
+        in: text,
+        fallback: anchor.text,
+        chapterTitle: chapterTitle,
+        parsedQuery: parsedQuery,
+        topicTerms: topicTerms,
+        contentMode: contentMode
+    )
+    if queryCenterNeedsPreviousContext(center.text),
+       let currentFirst = windowUnits.first,
+       currentFirst.index > 0 {
+        let previous = units[currentFirst.index - 1]
+        let currentLast = windowUnits.last ?? currentFirst
+        let gap = max(0.0, currentFirst.startSeconds - previous.endSeconds)
+        let repairedDuration = currentLast.endSeconds - previous.startSeconds
+        if gap <= 4.0,
+           repairedDuration <= anchorMaxDuration(config),
+           !contextBlockLooksPromotional(previous.text),
+           !hasSponsorOrShoutout(previous.text) {
+            windowUnits.insert(previous, at: 0)
+            rawText = stitchTextSegments(windowUnits.map(\.text))
+            text = finalizeMomentText(rawText)
+            words = wordCount(text)
+            lower = text.lowercased()
+            windowMatch = evaluateQueryMatch(text: text, chapterTitle: chapterTitle, parsedQuery: parsedQuery)
+            queryMatch = windowMatch.score >= anchorMatch.score ? windowMatch : anchorMatch
+            center = bestQueryCenter(
+                in: text,
+                fallback: anchor.text,
+                chapterTitle: chapterTitle,
+                parsedQuery: parsedQuery,
+                topicTerms: topicTerms,
+                contentMode: contentMode
+            )
+        }
+    }
+
+    let centerSentence = center.text
+    if isInterviewerSetup(centerSentence.lowercased()) {
+        return (nil, "interviewer_setup")
+    }
+    guard let first = windowUnits.first, let last = windowUnits.last else {
+        return (nil, "empty_query_window")
+    }
+    let queryIntent = queryIntentEvaluation(
+        text: text,
+        centerSentence: centerSentence,
+        parsedQuery: parsedQuery,
+        queryMatch: queryMatch,
+        anchorEvaluation: center.evaluation
+    )
+    let effectiveQueryMatch = queryMatchWithIntentBoost(queryMatch, intent: queryIntent)
+    let floor = queryMatchFloor(parsedQuery)
+    guard queryMatch.score >= floor else {
+        return (nil, "below_query_floor")
+    }
+
+    let keywords = extractKeywords(text)
+    let topicScore = topicRelevanceScore(keywords: keywords, topicTerms: topicTerms)
+    let hasNumber = lower.range(of: #"\d"#, options: .regularExpression) != nil
+    let numberAligned = hasNumber && isNumberTopicAligned(
+        text: text,
+        topicTerms: topicTerms.union(Set(parsedQuery.terms)),
+        chapterTitle: chapterTitle
+    )
+    let hasConsequence = hasConsequenceLanguage(lower)
+    let insight = min(28, max(insightScore(lower), max(0, center.evaluation.breakdown.score / 2)))
+    var concrete = max(concretenessScore(lower), center.evaluation.breakdown.concrete)
+    if hasNumber, !numberAligned {
+        concrete = Int((Double(concrete) * 0.4).rounded(.down))
+    }
+    if hasNumber, !hasConsequence {
+        concrete = Int((Double(concrete) * 0.65).rounded(.down))
+    }
+    concrete = min(30, concrete)
+
+    let selfContained = selfContainedScore(text: text, wordCount: words)
+    let specificity = chapterSpecificityScore(chapterTitle)
+    let rawChapterScore = chapterScore(
+        chapterTitle: chapterTitle,
+        chapterIndex: chapterIndex,
+        firstStart: first.startSeconds,
+        chapters: chapters
+    )
+    let chapterScore = min(14, max(0, Int((Double(rawChapterScore) * specificity).rounded())))
+    let quality = qualityPenalty(
+        text: lower,
+        wordCount: words,
+        chapterTitle: chapterTitle,
+        startSeconds: first.startSeconds
+    )
+
+    let productSignals = deriveProductWorthinessSignals(
+        text: text,
+        breakdown: center.evaluation.breakdown,
+        hasNumber: hasNumber,
+        numberIsTopicAligned: numberAligned,
+        hasConsequenceNearby: hasConsequence || center.evaluation.hasConsequenceNearby
+    )
+
+    let breakdown = MomentScoreBreakdown(
+        topicRelevance: topicScore,
+        insight: insight,
+        concreteness: concrete,
+        selfContained: selfContained,
+        chapter: chapterScore,
+        qualityPenalty: quality
+    )
+    let base = min(85, max(0, breakdown.baseScore))
+    let productEvaluation = evaluateProductQuality(
+        text: text,
+        centerSentence: centerSentence,
+        contentMode: contentMode,
+        baseScore: max(22, base),
+        productWorthinessSignals: productSignals,
+        topicAlignment: max(topicScore, center.evaluation.topicAlignment),
+        numberIsTopicAligned: hasNumber ? numberAligned : nil,
+        hasConsequenceNearby: hasConsequence || center.evaluation.hasConsequenceNearby,
+        concretenessScore: concrete,
+        insightScore: insight,
+        selfContainedScore: selfContained,
+        anchorScore: max(0, center.evaluation.breakdown.score),
+        chapterTitle: chapterTitle,
+        startSeconds: first.startSeconds
+    )
+
+    if productEvaluation.sponsorDetected || hasSponsorOrShoutout(text) {
+        return (nil, "sponsor_or_cta")
+    }
+    if productEvaluation.modeSpecificPenalties.contains("creator_or_podcast_meta")
+        || hasPodcastMetaFluff(lower)
+        || hasCreatorMetaHook(lower) {
+        return (nil, "sponsor_or_admin_meta")
+    }
+    if containsNarrationArtifact(lower), queryMatch.score < 80 {
+        return (nil, "caption_or_music_artifact")
+    }
+
+    var boundaryQuality = queryBoundaryQuality(
+        text: text,
+        wordCount: words,
+        selfContainedScore: selfContained
+    )
+    let centerRamblePenalty = queryRamblingPenalty(centerSentence)
+    let unresolvedQueryContext = queryCenterNeedsPreviousContext(centerSentence)
+        && text.hasPrefix(centerSentence)
+    if unresolvedQueryContext {
+        boundaryQuality = min(boundaryQuality, 58)
+    }
+    let mentionOnlyPenalty = queryMentionOnlyPenalty(
+        queryMatch: queryMatch,
+        intent: queryIntent,
+        productSignals: productSignals,
+        centerSentence: centerSentence
+    )
+    var momentQuality = queryMomentQuality(
+        productEvaluation: productEvaluation,
+        queryMatch: effectiveQueryMatch,
+        insightScore: insight,
+        concreteScore: concrete,
+        selfContainedScore: selfContained,
+        qualityPenalty: quality,
+        productSignals: productSignals
+    )
+    momentQuality = min(100, max(0, momentQuality + min(12, queryIntent.score / 2) - centerRamblePenalty - mentionOnlyPenalty))
+    let weakFragment = words < 18 || startsLikelyIncomplete(text) || endsLikelyIncomplete(text)
+    var combined = combinedQueryScore(
+        queryMatch: effectiveQueryMatch.score,
+        momentQuality: momentQuality,
+        boundaryQuality: boundaryQuality,
+        diversity: 0
+    )
+    if weakFragment { combined = min(combined, 60) }
+    if queryMatch.score < floor { combined = min(combined, 58) }
+    if momentQuality < 45 { combined = min(combined, 70) }
+    if centerRamblePenalty >= 30 { combined = min(combined, 62) }
+    if unresolvedQueryContext { combined = min(combined, 64) }
+
+    guard combined >= 45 else { return (nil, "weak_query_match") }
+
+    let type = candidateType(
+        insight: insight,
+        concreteness: concrete,
+        chapter: chapterScore,
+        lower: lower
+    )
+    let why = whySelected(
+        topicScore: topicScore,
+        insightScore: insight,
+        concreteScore: concrete,
+        selfContained: selfContained,
+        chapterScore: chapterScore,
+        qualityPenalty: quality
+    )
+    var strength = queryStrength(
+        combinedScore: combined,
+        queryMatch: effectiveQueryMatch,
+        momentQuality: momentQuality,
+        boundaryQuality: boundaryQuality
+    )
+    if centerRamblePenalty >= 30 {
+        strength = .weak
+    }
+    if unresolvedQueryContext {
+        strength = .weak
+    }
+
+    let moment = MomentCandidate(
+        startSeconds: first.startSeconds,
+        endSeconds: last.endSeconds,
+        titleHint: titleHint(text: text, chapterTitle: chapterTitle, candidateType: type),
+        cleanText: text,
+        candidateType: type,
+        confidence: Double(combined) / 100.0,
+        chapterTitle: chapterTitle,
+        chapterIndex: chapterIndex,
+        breakdown: breakdown,
+        keywords: keywords.union(Set(queryMatch.matchedTerms)),
+        why: why,
+        centerSentence: centerSentence,
+        anchorScore: max(0, center.evaluation.breakdown.score),
+        anchorBreakdown: center.evaluation.breakdown,
+        topicAlignment: max(topicScore, center.evaluation.topicAlignment),
+        chapterSpecificity: max(specificity, center.evaluation.chapterSpecificity),
+        numberIsTopicAligned: hasNumber ? numberAligned : nil,
+        hasConsequenceNearby: hasConsequence || center.evaluation.hasConsequenceNearby,
+        anchorRejected: false,
+        rejectionReason: nil,
+        productWorthinessSignals: productSignals,
+        contentMode: contentMode,
+        wouldUserClickScore: momentQuality,
+        clickScoreRaw: productEvaluation.rawScore,
+        scoreCapApplied: productEvaluation.scoreCapApplied,
+        scoreCapReason: productEvaluation.scoreCapReason,
+        usefulnessSignals: productEvaluation.usefulnessSignals,
+        modeSpecificBoosts: productEvaluation.modeSpecificBoosts,
+        modeSpecificPenalties: productEvaluation.modeSpecificPenalties,
+        sponsorDetected: productEvaluation.sponsorDetected,
+        selectedForProduct: strength != .weak && combined >= 75
+    )
+
+    return (
+        QueryMomentCandidate(
+            candidate: moment,
+            queryMatch: effectiveQueryMatch,
+            queryIntent: queryIntent,
+            momentQualityScore: momentQuality,
+            boundaryQualityScore: boundaryQuality,
+            combinedScore: combined,
+            queryStrength: strength,
+            videoURLAtTime: videoURLAtTime(sourceURL: sourceURL, startSeconds: first.startSeconds)
+        ),
+        nil
+    )
+}
+
+private func bestQueryCenter(
+    in text: String,
+    fallback: String,
+    chapterTitle: String?,
+    parsedQuery: ParsedMomentQuery,
+    topicTerms: Set<String>,
+    contentMode: ContentMode
+) -> (text: String, evaluation: AnchorEvaluation, match: QueryMatchEvaluation) {
+    let sentences = sentenceRanges(in: text)
+        .map { finalizeAnchorText(String(text[$0])) }
+        .filter { wordCount($0) >= 4 }
+
+    var best: (text: String, evaluation: AnchorEvaluation, match: QueryMatchEvaluation, score: Int)?
+    for sentence in sentences {
+        let match = evaluateQueryMatch(text: sentence, chapterTitle: chapterTitle, parsedQuery: parsedQuery)
+        let evaluation = anchorEvaluation(
+            text: sentence,
+            chapterTitle: chapterTitle,
+            topicTerms: topicTerms.union(Set(parsedQuery.terms)),
+            contentMode: contentMode
+        )
+        let intent = queryIntentEvaluation(
+            text: sentence,
+            centerSentence: sentence,
+            parsedQuery: parsedQuery,
+            queryMatch: match,
+            anchorEvaluation: evaluation
+        )
+        var score = match.score * 3 + max(0, evaluation.breakdown.score)
+        score += intent.score * 2
+        score -= queryRamblingPenalty(sentence)
+        if evaluation.rejectionReason == nil { score += 12 } else { score -= 22 }
+        if isQuestionAnchor(sentence) { score -= 28 }
+        if startsLikelyIncomplete(sentence) { score -= 14 }
+        if hasConsequenceLanguage(sentence.lowercased()) { score += 10 }
+        if queryCenterNeedsPreviousContext(sentence) { score -= 8 }
+        if score > (best?.score ?? Int.min) {
+            best = (sentence, evaluation, match, score)
+        }
+    }
+
+    if let best {
+        return (
+            capitalizeMomentStart(best.text),
+            best.evaluation,
+            best.match
+        )
+    }
+
+    let fallbackText = capitalizeMomentStart(finalizeAnchorText(fallback))
+    let fallbackEvaluation = anchorEvaluation(
+        text: fallbackText,
+        chapterTitle: chapterTitle,
+        topicTerms: topicTerms.union(Set(parsedQuery.terms)),
+        contentMode: contentMode
+    )
+    return (
+        fallbackText,
+        fallbackEvaluation,
+        evaluateQueryMatch(text: fallbackText, chapterTitle: chapterTitle, parsedQuery: parsedQuery)
+    )
+}
+
+private func queryAnchorHardRejection(_ text: String, chapterTitle: String?) -> String? {
+    let lower = text.lowercased()
+    if hasSponsorOrShoutout(text) || contextBlockLooksPromotional(text) {
+        return "sponsor_or_cta"
+    }
+    if hasPodcastMetaFluff(lower) || hasCreatorMetaHook(lower) || isAdChapterTitle(chapterTitle?.lowercased()) {
+        return "sponsor_or_admin_meta"
+    }
+    return nil
+}
+
+private func rejectedQueryAnchor(
+    _ anchor: ImpactUnit,
+    match: QueryMatchEvaluation,
+    chapters: [VideoChapter],
+    id: String,
+    reason: String
+) -> RejectedQueryAnchor {
+    let chapterContext = resolveChapterContext(
+        startSeconds: anchor.startSeconds,
+        preferredIndex: anchor.chapterIndex,
+        chapters: chapters
+    )
+    return RejectedQueryAnchor(
+        id: id,
+        startSeconds: roundTime(anchor.startSeconds),
+        endSeconds: roundTime(anchor.endSeconds),
+        centerSentence: capitalizeMomentStart(finalizeAnchorText(anchor.text)),
+        chapterTitle: chapterContext.title,
+        chapterIndex: chapterContext.index,
+        queryMatchScore: match.score,
+        matchedTerms: match.matchedTerms,
+        rejectionReason: reason
     )
 }
 
@@ -2796,6 +3544,390 @@ private func makeCandidate(
     )
 }
 
+// MARK: - Query scoring
+
+private func parseMomentQuery(_ raw: String) -> ParsedMomentQuery? {
+    let cleaned = cleanTranscript(raw)
+    guard !cleaned.isEmpty else { return nil }
+
+    var phrases: [String] = []
+    if let regex = try? NSRegularExpression(pattern: #""([^"]+)"|'([^']+)'"#) {
+        let nsRange = NSRange(cleaned.startIndex ..< cleaned.endIndex, in: cleaned)
+        for match in regex.matches(in: cleaned, range: nsRange) {
+            for index in 1 ..< match.numberOfRanges {
+                guard let range = Range(match.range(at: index), in: cleaned) else { continue }
+                let phrase = normalizedSearchPhrase(String(cleaned[range]))
+                if !phrase.isEmpty { phrases.append(phrase) }
+            }
+        }
+    }
+
+    let normalized = normalizedSearchPhrase(cleaned.replacingOccurrences(of: "\"", with: " "))
+    var terms = queryDisplayTokens(cleaned)
+        .filter { $0.count >= 2 && !queryStopwords.contains($0) }
+    if terms.isEmpty {
+        terms = queryDisplayTokens(cleaned).filter { $0.count >= 2 }
+    }
+    guard !terms.isEmpty else { return nil }
+
+    if terms.count >= 2 {
+        phrases.append(normalized)
+    }
+
+    var seenTerms = Set<String>()
+    let uniqueTerms = terms.filter { seenTerms.insert($0).inserted }
+    var variants: [String: Set<String>] = [:]
+    for term in uniqueTerms {
+        variants[term] = searchTokenVariants(term)
+    }
+
+    return ParsedMomentQuery(
+        raw: cleaned,
+        normalized: normalized,
+        terms: uniqueTerms,
+        termVariants: variants,
+        phrases: Array(Set(phrases)).sorted()
+    )
+}
+
+private func evaluateQueryMatch(
+    text: String,
+    chapterTitle: String?,
+    parsedQuery: ParsedMomentQuery
+) -> QueryMatchEvaluation {
+    let normalizedText = normalizedSearchPhrase(text)
+    let normalizedChapter = chapterTitle.map(normalizedSearchPhrase) ?? ""
+    let tokens = searchTokens(text)
+    let chapterTokens = searchTokens(chapterTitle ?? "")
+
+    var score = 0
+    var reasons: [String] = []
+    var exactPhrase = false
+    var chapterSupportsQuery = false
+    var chapterBoost = 0
+    var matchedTerms: [String] = []
+    var positionsByTerm: [String: [Int]] = [:]
+
+    for phrase in parsedQuery.phrases where phrase.count >= 3 {
+        if normalizedText.contains(phrase) {
+            exactPhrase = true
+            score += phrase == parsedQuery.normalized ? 56 : 46
+            reasons.append("exact query phrase")
+            break
+        }
+        if normalizedChapter.contains(phrase) {
+            chapterSupportsQuery = true
+            chapterBoost = max(chapterBoost, 18)
+        }
+    }
+
+    for term in parsedQuery.terms {
+        let variants = parsedQuery.termVariants[term] ?? [term]
+        var positions: [Int] = []
+        for (idx, token) in tokens.enumerated() where variants.contains(token) {
+            positions.append(idx)
+        }
+        let textMatched = !positions.isEmpty
+        if !textMatched, chapterTokens.contains(where: { variants.contains($0) }) {
+            chapterSupportsQuery = true
+        }
+        if textMatched {
+            matchedTerms.append(term)
+            positionsByTerm[term] = positions
+        }
+    }
+
+    guard exactPhrase || !matchedTerms.isEmpty else {
+        return QueryMatchEvaluation(
+            score: 0,
+            matchedTerms: [],
+            exactPhrase: false,
+            allTermsMatched: false,
+            proximity: nil,
+            reasons: []
+        )
+    }
+
+    let allTermsMatched = matchedTerms.count == parsedQuery.terms.count
+    if !matchedTerms.isEmpty {
+        let ratio = Double(matchedTerms.count) / Double(max(1, parsedQuery.terms.count))
+        score += Int((ratio * 34.0).rounded())
+        reasons.append(allTermsMatched ? "matched all query terms" : "matched query terms")
+    }
+
+    let textMatchedTerms = parsedQuery.terms.filter { positionsByTerm[$0]?.isEmpty == false }
+    if !textMatchedTerms.isEmpty {
+        let frequency = textMatchedTerms.reduce(0) { total, term in
+            total + min(4, positionsByTerm[term]?.count ?? 0)
+        }
+        score += min(12, frequency * 2)
+    }
+
+    let proximity = queryTermProximity(positionsByTerm: positionsByTerm, terms: parsedQuery.terms)
+    if let proximity {
+        if proximity <= 2 {
+            score += 22
+            reasons.append("query terms adjacent")
+        } else if proximity <= 8 {
+            score += 16
+            reasons.append("query terms close together")
+        } else if proximity <= 18 {
+            score += 9
+            reasons.append("query terms in same moment")
+        }
+    }
+
+    if chapterSupportsQuery {
+        score += max(6, chapterBoost)
+        reasons.append("chapter supports query")
+    }
+
+    if exactPhrase, !reasons.contains("exact query phrase") {
+        reasons.insert("exact query phrase", at: 0)
+    }
+
+    return QueryMatchEvaluation(
+        score: min(100, max(0, score)),
+        matchedTerms: Array(Set(matchedTerms)).sorted(),
+        exactPhrase: exactPhrase,
+        allTermsMatched: allTermsMatched,
+        proximity: proximity,
+        reasons: Array(Set(reasons)).sorted()
+    )
+}
+
+private func queryTermProximity(
+    positionsByTerm: [String: [Int]],
+    terms: [String]
+) -> Int? {
+    let positionLists = terms.compactMap { positionsByTerm[$0] }.filter { !$0.isEmpty }
+    guard positionLists.count >= 2, positionLists.count == terms.count else { return nil }
+
+    var bestSpan = Int.max
+    for list in positionLists {
+        for position in list {
+            var minPosition = position
+            var maxPosition = position
+            var valid = true
+            for otherList in positionLists where otherList != list {
+                guard let nearest = otherList.min(by: { abs($0 - position) < abs($1 - position) }) else {
+                    valid = false
+                    break
+                }
+                minPosition = min(minPosition, nearest)
+                maxPosition = max(maxPosition, nearest)
+            }
+            if valid {
+                bestSpan = min(bestSpan, maxPosition - minPosition)
+            }
+        }
+    }
+    return bestSpan == Int.max ? nil : bestSpan
+}
+
+private func queryMatchFloor(_ parsedQuery: ParsedMomentQuery) -> Int {
+    parsedQuery.terms.count <= 1 ? 30 : 40
+}
+
+private func queryMatchWithIntentBoost(
+    _ match: QueryMatchEvaluation,
+    intent: QueryIntentEvaluation
+) -> QueryMatchEvaluation {
+    QueryMatchEvaluation(
+        score: min(100, max(0, match.score + intent.score)),
+        matchedTerms: match.matchedTerms,
+        exactPhrase: match.exactPhrase,
+        allTermsMatched: match.allTermsMatched,
+        proximity: match.proximity,
+        reasons: match.reasons
+    )
+}
+
+private func queryIntentEvaluation(
+    text: String,
+    centerSentence: String,
+    parsedQuery: ParsedMomentQuery,
+    queryMatch: QueryMatchEvaluation,
+    anchorEvaluation: AnchorEvaluation
+) -> QueryIntentEvaluation {
+    guard queryMatch.score > 0 else {
+        return QueryIntentEvaluation(score: 0, signals: [], reasons: [])
+    }
+
+    let lower = text.lowercased()
+    let center = centerSentence.lowercased()
+    let queryIsClose = queryMatch.exactPhrase
+        || queryMatch.allTermsMatched
+        || (queryMatch.proximity ?? Int.max) <= 8
+        || parsedQuery.terms.count == 1
+
+    var score = 0
+    var signals = Set<String>()
+    var reasons = Set<String>()
+
+    func add(_ signal: String, _ points: Int, _ reason: String) {
+        guard queryIsClose else { return }
+        score += points
+        signals.insert(signal)
+        reasons.insert(reason)
+    }
+
+    let payoffSignals = Set(anchorEvaluation.productWorthinessSignals)
+    if hasConsequenceLanguage(center) || hasConsequenceLanguage(lower) || payoffSignals.contains("consequence") {
+        add("query_consequence", 12, "shows query consequence")
+    }
+    if containsAny(center, ["because", "reason", "why", "this means", "means that", "therefore", "as a result"]) {
+        add("query_explanation", 10, "explains query concept")
+    }
+    if containsAny(center, ["instead of", "rather than", "tradeoff", "decision", "rule", "mistake", "should", "need to", "have to"]) || payoffSignals.contains("decision_point") {
+        add("query_decision", 9, "ties query to a decision or tradeoff")
+    }
+    if payoffSignals.contains("surprising_claim")
+        || containsAny(center, ["turns out", "surprising", "counterintuitive", "unexpected"]) {
+        add("query_surprise", 7, "surprising query-relevant claim")
+    }
+    if queryMatch.exactPhrase, !signals.isEmpty {
+        score += 4
+        reasons.insert("exact phrase near payoff")
+    }
+
+    return QueryIntentEvaluation(
+        score: min(24, max(0, score)),
+        signals: Array(signals).sorted(),
+        reasons: Array(reasons).sorted()
+    )
+}
+
+private func queryRamblingPenalty(_ text: String) -> Int {
+    let words = wordCount(text)
+    let terminalCount = text.reduce(0) { total, character in
+        total + (".?!".contains(character) ? 1 : 0)
+    }
+    if words >= 70 { return 35 }
+    if words > 45, terminalCount == 0 { return 30 }
+    if words > 40, !endsLikelyComplete(text) { return 24 }
+    if words > 55 { return 18 }
+    return 0
+}
+
+private func queryMentionOnlyPenalty(
+    queryMatch: QueryMatchEvaluation,
+    intent: QueryIntentEvaluation,
+    productSignals: [String],
+    centerSentence: String
+) -> Int {
+    if intent.score > 0 { return 0 }
+    let lower = centerSentence.lowercased()
+    let strongProductSignals: Set<String> = [
+        "consequence", "strong_contrast", "decision_point", "actionable_rule",
+        "surprising_claim", "topic_aligned_number", "topic_aligned_concrete_evidence"
+    ]
+    if !Set(productSignals).isDisjoint(with: strongProductSignals) { return 0 }
+    if hasConsequenceLanguage(lower) { return 0 }
+    if queryMatch.exactPhrase || queryMatch.allTermsMatched { return 20 }
+    return 12
+}
+
+private func queryCenterNeedsPreviousContext(_ text: String) -> Bool {
+    let lower = text.lowercased().trimmingCharacters(in: .whitespacesAndNewlines)
+    if startsWithDanglingWindowPronoun(text) { return true }
+    let productiveThisPattern = #"^(?:with|using|through|in|on|for|from|as|at)\b[^.?!]{0,140},?\s+this\s+(?:means|allows|lets|creates|turns|shows|unlocks)\b"#
+    if lower.range(of: productiveThisPattern, options: .regularExpression) != nil {
+        return false
+    }
+    let pattern = #"^(?:with|using|through|in|on|for|from|as|at)\b[^.?!]{0,140},?\s+(?:he|she|it|they|this|that)\s+(?:can|could|will|would|is|are|was|were|gives?|allows?|lets?|means|needs?|has|have)\b"#
+    return lower.range(of: pattern, options: .regularExpression) != nil
+}
+
+private func queryBoundaryQuality(
+    text: String,
+    wordCount: Int,
+    selfContainedScore: Int
+) -> Int {
+    var score = 28 + min(52, selfContainedScore * 4)
+    if wordCount >= 18 && wordCount <= 180 { score += 10 }
+    if wordCount >= 28 && wordCount <= 140 { score += 6 }
+    if startsLikelyIncomplete(text) { score -= 18 }
+    if endsLikelyIncomplete(text) { score -= 18 }
+    if hasDirtyOpeningSentence(text) { score -= 16 }
+    if startsWithDanglingWindowPronoun(text) { score -= 12 }
+    score -= min(22, queryRamblingPenalty(text))
+    if text.contains(".") || text.contains("?") || text.contains("!") { score += 6 }
+    return min(100, max(0, score))
+}
+
+private func queryMomentQuality(
+    productEvaluation: ProductEvaluation,
+    queryMatch: QueryMatchEvaluation,
+    insightScore: Int,
+    concreteScore: Int,
+    selfContainedScore: Int,
+    qualityPenalty: Int,
+    productSignals: [String]
+) -> Int {
+    var score = productEvaluation.finalScore
+    let fallback = 34
+        + min(20, insightScore)
+        + min(16, concreteScore / 2)
+        + min(16, selfContainedScore)
+        + max(-16, qualityPenalty / 2)
+        + min(12, productSignals.count * 4)
+    if queryMatch.score >= 70 {
+        score = max(score, min(78, fallback + 8))
+    } else if queryMatch.score >= 45 {
+        score = max(score, min(72, fallback))
+    }
+    return min(100, max(0, score))
+}
+
+private func combinedQueryScore(
+    queryMatch: Int,
+    momentQuality: Int,
+    boundaryQuality: Int,
+    diversity: Int
+) -> Int {
+    let score = (Double(queryMatch) * 0.50)
+        + (Double(momentQuality) * 0.25)
+        + (Double(boundaryQuality) * 0.15)
+        + (Double(diversity) * 0.10)
+    return min(100, max(0, Int(score.rounded())))
+}
+
+private func queryStrength(
+    combinedScore: Int,
+    queryMatch: QueryMatchEvaluation,
+    momentQuality: Int,
+    boundaryQuality: Int
+) -> QueryMomentStrength {
+    if combinedScore >= 78,
+       queryMatch.score >= 70,
+       boundaryQuality >= 68,
+       momentQuality >= 58 {
+        return .strong
+    }
+    if combinedScore >= 55,
+       queryMatch.score >= 34,
+       momentQuality >= 45,
+       boundaryQuality >= 60 {
+        return .medium
+    }
+    return .weak
+}
+
+private func aggregateQueryStrength(_ moments: [RankedMoment]) -> QueryMomentStrength? {
+    guard let first = moments.first?.queryStrength else { return nil }
+    return QueryMomentStrength(rawValue: first) ?? .weak
+}
+
+private func videoURLAtTime(sourceURL: String, startSeconds: Double) -> String? {
+    guard !sourceURL.isEmpty else { return nil }
+    let seconds = max(0, Int(startSeconds.rounded(.down)))
+    if sourceURL.contains("?") {
+        return "\(sourceURL)&t=\(seconds)s"
+    }
+    return "\(sourceURL)?t=\(seconds)s"
+}
+
 // MARK: - Scoring
 
 private func topicRelevanceScore(keywords: Set<String>, topicTerms: Set<String>) -> Int {
@@ -3263,6 +4395,73 @@ private func selectWithDiversity(
     return selected
 }
 
+private func selectQueryMoments(
+    candidates: [QueryMomentCandidate],
+    limit: Int
+) -> QuerySelectionResult {
+    guard !candidates.isEmpty else {
+        return QuerySelectionResult(selected: [], dedupedOverlaps: [])
+    }
+
+    let viable = candidates.filter { $0.combinedScore >= 45 }
+    let hasProductStrength = viable.contains { $0.queryStrength != .weak }
+    let pool = hasProductStrength
+        ? viable.filter { $0.queryStrength != .weak }
+        : Array(viable.prefix(min(limit, 3)))
+
+    var selected: [SelectedQueryCandidate] = []
+    var deduped: [DedupedQueryOverlap] = []
+
+    for candidate in pool {
+        if selected.count >= limit { break }
+
+        let duplicate = selected
+            .map { selectedCandidate -> (selected: SelectedQueryCandidate, similarity: Double, temporal: Double) in
+                (
+                    selectedCandidate,
+                    similarity(candidate.candidate, selectedCandidate.candidate.candidate),
+                    temporalSimilarity(candidate.candidate, selectedCandidate.candidate.candidate)
+                )
+            }
+            .first {
+                $0.similarity > 0.82 || $0.temporal > 0.30
+            }
+
+        if let duplicate {
+            let duplicateIndex = selected.firstIndex {
+                $0.candidate.candidate.startSeconds == duplicate.selected.candidate.candidate.startSeconds
+            } ?? max(0, selected.count - 1)
+            deduped.append(
+                DedupedQueryOverlap(
+                    id: "qd\(deduped.count + 1)",
+                    duplicateOf: "q\(duplicateIndex + 1)",
+                    startSeconds: roundTime(candidate.candidate.startSeconds),
+                    endSeconds: roundTime(candidate.candidate.endSeconds),
+                    overlapRatio: roundConfidence(duplicate.temporal),
+                    similarity: roundConfidence(duplicate.similarity),
+                    reason: duplicate.temporal > 0.30 ? "temporal_overlap" : "lexical_overlap",
+                    centerSentence: candidate.candidate.centerSentence ?? ""
+                )
+            )
+            continue
+        }
+
+        let maxSimilarity = selected
+            .map { similarity(candidate.candidate, $0.candidate.candidate) }
+            .max() ?? 0.0
+        let maxTemporal = selected
+            .map { temporalSimilarity(candidate.candidate, $0.candidate.candidate) }
+            .max() ?? 0.0
+        let diversity = selected.isEmpty
+            ? 10
+            : max(0, Int(((1.0 - maxSimilarity) * 10.0).rounded()) - Int((maxTemporal * 8.0).rounded()))
+
+        selected.append(SelectedQueryCandidate(candidate: candidate, diversityBonus: diversity))
+    }
+
+    return QuerySelectionResult(selected: selected, dedupedOverlaps: deduped)
+}
+
 private func passesFinalProductGate(_ candidate: MomentCandidate) -> Bool {
     guard candidate.selectedForProduct,
           candidate.wouldUserClickScore >= 75,
@@ -3336,6 +4535,91 @@ private let stopwords: Set<String> = [
     "were", "what", "when", "where", "which", "while", "with", "would", "your",
     "you", "and", "the", "for", "are", "but", "not", "was", "all", "can", "our"
 ]
+
+private let queryStopwords: Set<String> = stopwords.union([
+    "find", "show", "give", "moment", "moments", "clip", "clips", "video"
+])
+
+private func normalizedSearchPhrase(_ text: String) -> String {
+    searchTokens(text).joined(separator: " ")
+}
+
+private func queryDisplayTokens(_ text: String) -> [String] {
+    text
+        .lowercased()
+        .components(separatedBy: CharacterSet.alphanumerics.inverted)
+        .map(normalizedToken)
+        .filter { !$0.isEmpty }
+}
+
+private func searchTokens(_ text: String) -> [String] {
+    text
+        .lowercased()
+        .components(separatedBy: CharacterSet.alphanumerics.inverted)
+        .map(stemSearchToken)
+        .filter { !$0.isEmpty }
+}
+
+private func searchTokenVariants(_ token: String) -> Set<String> {
+    let stem = stemSearchToken(token)
+    var variants = Set([token, stem].filter { !$0.isEmpty })
+
+    if stem == "ai" {
+        variants.formUnion(["ai", "artificial", "intelligence"])
+    }
+    if stem == "local" {
+        variants.insert("locally")
+    }
+    if stem == "price" {
+        variants.formUnion(["pricing", "priced", "prices"])
+    }
+    if stem == "cost" {
+        variants.formUnion(["costs", "costing"])
+    }
+    if stem == "model" {
+        variants.insert("models")
+    }
+    if stem == "agent" {
+        variants.insert("agents")
+    }
+
+    return variants.map(stemSearchToken).reduce(into: variants) { $0.insert($1) }
+}
+
+private func stemSearchToken(_ token: String) -> String {
+    var value = normalizedToken(token)
+    guard value.count > 3 else { return value }
+
+    if value.hasSuffix("ies"), value.count > 5 {
+        value = String(value.dropLast(3)) + "y"
+    } else if value.hasSuffix("ing"), value.count > 5 {
+        value = String(value.dropLast(3))
+        if value.hasSuffix("c") { value += "e" }
+        value = dropDoubledFinalConsonant(value)
+    } else if value.hasSuffix("ed"), value.count > 4 {
+        value = String(value.dropLast(2))
+        value = dropDoubledFinalConsonant(value)
+    } else if value.hasSuffix("ly"), value.count > 5 {
+        value = String(value.dropLast(2))
+    } else if value.hasSuffix("es"), value.count > 4 {
+        value = String(value.dropLast(2))
+    } else if value.hasSuffix("s"), value.count > 4, !value.hasSuffix("ss") {
+        value = String(value.dropLast())
+    }
+
+    return value
+}
+
+private func dropDoubledFinalConsonant(_ value: String) -> String {
+    guard value.count >= 2,
+          let last = value.last else { return value }
+    let previous = value[value.index(before: value.index(before: value.endIndex))]
+    let vowels: Set<Character> = ["a", "e", "i", "o", "u"]
+    if last == previous, !vowels.contains(last) {
+        return String(value.dropLast())
+    }
+    return value
+}
 
 private func extractKeywords(_ text: String) -> Set<String> {
     let tokens = text

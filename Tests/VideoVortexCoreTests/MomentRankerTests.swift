@@ -773,4 +773,283 @@ struct MomentRankerTests {
 
         #expect(Set(ranked.compactMap(\.chapterTitle)).count == 2)
     }
+
+    @Test("Query moments search the full transcript instead of global top moments")
+    func queryMomentsSearchFullTranscript() {
+        let blocks = [
+            block(1, 0, 8, "The key cost result is 40 percent cheaper because token caching removes repeated work.", chapterIndex: 0),
+            block(2, 8, 16, "This means one automation costs pennies instead of dollars and can run more often.", chapterIndex: 0),
+            block(3, 16, 24, "Compared to the old process, the team saves hours on every review.", chapterIndex: 0),
+            block(4, 90, 98, "The panel moved through a few unrelated notes before the next topic.", chapterIndex: 1),
+            block(5, 120, 128, "Local AI matters because private customer data can stay on the laptop instead of leaving the company.", chapterIndex: 2),
+            block(6, 128, 136, "This means teams can test sensitive workflows without paying network latency or token costs on every draft.", chapterIndex: 2),
+            block(7, 136, 144, "The tradeoff is weaker model quality, but the decision rule is to keep confidential work local first.", chapterIndex: 2),
+        ]
+        let chapters = [
+            VideoChapter(title: "Cost benchmark", startTime: 0, endTime: 60, estimatedTokens: nil),
+            VideoChapter(title: "Transition", startTime: 60, endTime: 110, estimatedTokens: nil),
+            VideoChapter(title: "Local AI privacy", startTime: 110, endTime: 160, estimatedTokens: nil),
+        ]
+        let result = SenseResult(
+            url: "https://youtube.com/watch?v=querytest",
+            title: "Automation cost and private local AI workflows",
+            transcriptSource: .manual,
+            transcriptBlocks: blocks,
+            estimatedTokens: blocks.map(\.estimatedTokens).reduce(0, +),
+            chapters: chapters
+        )
+
+        let global = MomentRanker.rankedMoments(for: result, limit: 1)
+        let query = MomentRanker.rankQuery(
+            result: result,
+            query: "local AI",
+            config: MomentRankerConfig(limit: 2, includeCandidates: true, minDurationSeconds: 6, targetDurationSeconds: 18, maxDurationSeconds: 32)
+        )
+
+        #expect(global.first?.cleanText.contains("40 percent") == true)
+        #expect(query.rankedMoments.first?.cleanText.contains("Local AI") == true)
+        #expect((query.rankedMoments.first?.startSeconds ?? 0) >= 110)
+        #expect(query.rankedMoments.first?.matchedTerms?.contains("local") == true)
+        #expect(query.rankedMoments.first?.matchedTerms?.contains("ai") == true)
+        #expect((query.rankedMoments.first?.queryMatchScore ?? 0) >= 70)
+        #expect(query.rankedMoments.first?.videoURLAtTime?.contains("t=120s") == true)
+        #expect(query.queryCandidates?.isEmpty == false)
+    }
+
+    @Test("Query moments return empty result with reason when no query match exists")
+    func queryMomentsReturnEmptyForNoMatch() {
+        let blocks = [
+            block(1, 0, "The key cost result is cheaper because token caching removes repeated work.", chapterIndex: 0),
+            block(2, 10, "This means one automation costs pennies instead of dollars and can run more often.", chapterIndex: 0),
+        ]
+        let result = SenseResult(
+            url: "https://example.com/video",
+            title: "Cost benchmark",
+            transcriptSource: .manual,
+            transcriptBlocks: blocks,
+            estimatedTokens: blocks.map(\.estimatedTokens).reduce(0, +)
+        )
+
+        let query = MomentRanker.rankQuery(
+            result: result,
+            query: "volcano ash",
+            config: MomentRankerConfig(limit: 3, includeCandidates: true)
+        )
+
+        #expect(query.rankedMoments.isEmpty)
+        #expect(query.noResultReason == "no_query_match")
+        #expect(query.queryStrength == .weak)
+        #expect(query.queryCandidates?.isEmpty == true)
+    }
+
+    @Test("Query moments dedupe overlapping query windows")
+    func queryMomentsDedupeOverlappingWindows() {
+        let blocks = [
+            block(1, 0, 8, "Local AI matters because private data can stay on the laptop.", chapterIndex: 0),
+            block(2, 8, 16, "Local AI also cuts latency because the workflow does not wait on a remote API.", chapterIndex: 0),
+            block(3, 16, 24, "This means sensitive drafts can be tested quickly before anything leaves the company.", chapterIndex: 0),
+            block(4, 90, 98, "A separate local AI lesson is that smaller models are cheaper but need tighter evals.", chapterIndex: 1),
+            block(5, 98, 106, "The decision rule is to run local first, then escalate only when quality fails.", chapterIndex: 1),
+        ]
+        let chapters = [
+            VideoChapter(title: "Local privacy", startTime: 0, endTime: 60, estimatedTokens: nil),
+            VideoChapter(title: "Local evals", startTime: 80, endTime: 130, estimatedTokens: nil),
+        ]
+        let result = SenseResult(
+            url: "https://example.com/video",
+            title: "Local AI workflows",
+            transcriptSource: .manual,
+            transcriptBlocks: blocks,
+            estimatedTokens: blocks.map(\.estimatedTokens).reduce(0, +),
+            chapters: chapters
+        )
+
+        let query = MomentRanker.rankQuery(
+            result: result,
+            query: "local AI",
+            config: MomentRankerConfig(limit: 3, includeCandidates: true, minDurationSeconds: 6, targetDurationSeconds: 18, maxDurationSeconds: 32)
+        )
+
+        #expect(query.rankedMoments.count == 2)
+        #expect(query.dedupedOverlaps?.isEmpty == false)
+        let first = query.rankedMoments[0]
+        let second = query.rankedMoments[1]
+        let overlap = max(0.0, min(first.endSeconds, second.endSeconds) - max(first.startSeconds, second.startSeconds))
+        #expect(overlap == 0)
+    }
+
+    @Test("Query moments reject sponsor matches instead of forcing a result")
+    func queryMomentsRejectSponsorMatches() {
+        let blocks = [
+            block(1, 0, 8, "Let me break this down. In just eight weeks, I've seen a serious shift.", chapterIndex: 0),
+            block(2, 8, 16, "The reason, Fit Script. They ran 124 biomarkers and gave me a plan.", chapterIndex: 0),
+            block(3, 60, 68, "The real lesson is that product teams should validate retention before scaling spend.", chapterIndex: 1),
+        ]
+        let chapters = [
+            VideoChapter(title: "Sponsor", startTime: 0, endTime: 30, estimatedTokens: nil),
+            VideoChapter(title: "Retention lesson", startTime: 50, endTime: 90, estimatedTokens: nil),
+        ]
+        let result = SenseResult(
+            url: "https://example.com/video",
+            title: "Retention lessons",
+            transcriptSource: .manual,
+            transcriptBlocks: blocks,
+            estimatedTokens: blocks.map(\.estimatedTokens).reduce(0, +),
+            chapters: chapters
+        )
+
+        let query = MomentRanker.rankQuery(
+            result: result,
+            query: "Fit Script",
+            config: MomentRankerConfig(limit: 3, includeCandidates: true, minDurationSeconds: 6, targetDurationSeconds: 18, maxDurationSeconds: 32)
+        )
+
+        #expect(query.rankedMoments.isEmpty)
+        #expect(query.noResultReason == "no_useful_query_moment")
+        #expect(query.rejectedQueryAnchors?.contains(where: { $0.rejectionReason == "sponsor_or_cta" || $0.rejectionReason == "sponsor_or_admin_meta" }) == true)
+    }
+
+    @Test("Query moments support single-keyword searches")
+    func queryMomentsSupportSingleKeywordSearches() {
+        let blocks = [
+            block(1, 0, 8, "Firecrawl matters because it turns messy websites into clean markdown for agents.", chapterIndex: 0),
+            block(2, 8, 16, "This means the crawler can feed reliable pages into evals instead of brittle scraping.", chapterIndex: 0),
+            block(3, 60, 68, "A separate point is that model quality still needs measurement.", chapterIndex: 1),
+        ]
+        let result = SenseResult(
+            url: "https://example.com/video",
+            title: "Firecrawl agent workflows",
+            transcriptSource: .manual,
+            transcriptBlocks: blocks,
+            estimatedTokens: blocks.map(\.estimatedTokens).reduce(0, +)
+        )
+
+        let query = MomentRanker.rankQuery(
+            result: result,
+            query: "Firecrawl",
+            config: MomentRankerConfig(limit: 3, includeCandidates: true, minDurationSeconds: 6, targetDurationSeconds: 18, maxDurationSeconds: 32)
+        )
+
+        #expect(query.rankedMoments.isEmpty == false)
+        #expect(query.rankedMoments.first?.matchedTerms?.contains("firecrawl") == true)
+        #expect((query.rankedMoments.first?.queryMatchScore ?? 0) >= 30)
+        #expect(query.rankedMoments.first?.whySelected.contains("shows query consequence") == true)
+    }
+
+    @Test("Query moments apply query floor before global quality can rescue weak matches")
+    func queryMomentsApplyQueryFloor() {
+        let blocks = [
+            block(1, 0, 8, "Software matters because teams can ship safely when release checks catch mistakes.", chapterIndex: 0),
+            block(2, 8, 16, "This means the workflow saves days and reduces failed deploys.", chapterIndex: 0),
+            block(3, 60, 68, "Agents are mentioned briefly in the intro with no useful detail.", chapterIndex: 1),
+        ]
+        let result = SenseResult(
+            url: "https://example.com/video",
+            title: "Release workflow",
+            transcriptSource: .manual,
+            transcriptBlocks: blocks,
+            estimatedTokens: blocks.map(\.estimatedTokens).reduce(0, +)
+        )
+
+        let query = MomentRanker.rankQuery(
+            result: result,
+            query: "software agents",
+            config: MomentRankerConfig(limit: 3, includeCandidates: true, minDurationSeconds: 6, targetDurationSeconds: 18, maxDurationSeconds: 32)
+        )
+
+        #expect(query.rankedMoments.isEmpty)
+        #expect(query.noResultReason == "no_useful_query_moment")
+        #expect(query.rejectedQueryAnchors?.contains(where: { $0.rejectionReason == "below_query_floor" }) == true)
+    }
+
+    @Test("Query moments prefer concise payoff over run-on exact phrase")
+    func queryMomentsPreferConcisePayoffOverRunOnExactPhrase() {
+        let longRant = "Simplify business is what you want to do when everything gets complicated and you want to simplify business in order to have that one one one when you're in it though you're tied into every nuance because if I tell you change that you say wait I have a story about the first company and the customer and the team and all the details that pull us away"
+        let blocks = [
+            block(1, 0, 12, longRant, chapterIndex: 0),
+            block(2, 50, 58, "The real rule is to simplify business by cutting every product line that does not change retention.", chapterIndex: 1),
+            block(3, 58, 66, "This matters because the team can then measure one customer promise instead of ten competing stories.", chapterIndex: 1),
+        ]
+        let chapters = [
+            VideoChapter(title: "Messy story", startTime: 0, endTime: 30, estimatedTokens: nil),
+            VideoChapter(title: "Simplify business rule", startTime: 40, endTime: 90, estimatedTokens: nil),
+        ]
+        let result = SenseResult(
+            url: "https://example.com/video",
+            title: "Simplify business",
+            transcriptSource: .manual,
+            transcriptBlocks: blocks,
+            estimatedTokens: blocks.map(\.estimatedTokens).reduce(0, +),
+            chapters: chapters
+        )
+
+        let query = MomentRanker.rankQuery(
+            result: result,
+            query: "simplify business",
+            config: MomentRankerConfig(limit: 2, includeCandidates: true, minDurationSeconds: 6, targetDurationSeconds: 18, maxDurationSeconds: 32)
+        )
+
+        #expect(query.rankedMoments.first?.centerSentence?.contains("real rule") == true)
+        #expect((query.rankedMoments.first?.momentQualityScore ?? 0) >= 55)
+    }
+
+    @Test("Query moments prepend context for dangling query centers")
+    func queryMomentsPrependContextForDanglingCenters() {
+        let blocks = [
+            block(1, 0, 8, "The Obsidian CLI is the bridge between the vault and the agent.", chapterIndex: 0),
+            block(2, 8, 16, "With the Obsidian CLI, it can give Claude Code not only files but relationships and backlinks.", chapterIndex: 0),
+            block(3, 16, 24, "This matters because Claude Code can reason across notes instead of reading isolated markdown.", chapterIndex: 0),
+        ]
+        let result = SenseResult(
+            url: "https://example.com/video",
+            title: "Claude Code Obsidian workflow",
+            transcriptSource: .manual,
+            transcriptBlocks: blocks,
+            estimatedTokens: blocks.map(\.estimatedTokens).reduce(0, +)
+        )
+
+        let query = MomentRanker.rankQuery(
+            result: result,
+            query: "Claude Code Obsidian",
+            config: MomentRankerConfig(limit: 2, includeCandidates: true, minDurationSeconds: 6, targetDurationSeconds: 18, maxDurationSeconds: 32)
+        )
+
+        let text = query.rankedMoments.first?.cleanText ?? ""
+        #expect(text.hasPrefix("The Obsidian CLI is the bridge") == true)
+        #expect(text.contains("it can give Claude Code") == true)
+    }
+
+    @Test("Query moments demote unresolved preposition pronoun anchors")
+    func queryMomentsDemoteUnresolvedPrepositionPronounAnchors() {
+        let blocks = [
+            block(1, 0, 8, "With the Obsidian CLI, it can give Claude Code relationships and backlinks because the vault already has that graph.", chapterIndex: 0),
+            block(2, 50, 58, "Claude Code and Obsidian work best when the vault stores decisions, projects, and daily notes together.", chapterIndex: 1),
+            block(3, 58, 66, "This matters because the agent can explain why a note connects to a project instead of only reading isolated files.", chapterIndex: 1),
+        ]
+        let chapters = [
+            VideoChapter(title: "Dangling setup", startTime: 0, endTime: 20, estimatedTokens: nil),
+            VideoChapter(title: "Claude Code Obsidian payoff", startTime: 40, endTime: 90, estimatedTokens: nil),
+        ]
+        let result = SenseResult(
+            url: "https://example.com/video",
+            title: "Claude Code Obsidian workflow",
+            transcriptSource: .manual,
+            transcriptBlocks: blocks,
+            estimatedTokens: blocks.map(\.estimatedTokens).reduce(0, +),
+            chapters: chapters
+        )
+
+        let query = MomentRanker.rankQuery(
+            result: result,
+            query: "Claude Code Obsidian",
+            config: MomentRankerConfig(limit: 2, includeCandidates: true, minDurationSeconds: 6, targetDurationSeconds: 18, maxDurationSeconds: 32)
+        )
+
+        #expect(query.rankedMoments.first?.cleanText.contains("work best") == true)
+        #expect(query.rankedMoments.first?.selectedForProduct == true)
+        #expect(query.queryCandidates?.contains(where: {
+            $0.centerSentence?.hasPrefix("With the Obsidian CLI") == true
+                && $0.selectedForProduct == false
+        }) == true)
+    }
 }

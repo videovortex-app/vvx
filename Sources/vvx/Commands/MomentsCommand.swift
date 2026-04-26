@@ -14,9 +14,12 @@ struct MomentsCommand: AsyncParsableCommand {
 
         Debug/eval path:
           vvx moments --from-sense result.json --limit 10 --explain
+          vvx moments --from-sense result.json --query "local AI" --limit 10 --explain
 
         This command does not search the archive, gather clips, or call an LLM.
-        It maps one transcript to ranked moments.
+        It maps one transcript to ranked moments. With --query, it generates
+        fresh query-specific moments from the full transcript; it does not filter
+        the global rankedMoments.
         """
     )
 
@@ -26,7 +29,10 @@ struct MomentsCommand: AsyncParsableCommand {
     @Option(name: .long, help: "Maximum ranked moments to return. Default: 10.")
     var limit: Int = 10
 
-    @Flag(name: .long, help: "Include debug momentCandidates before the MMR diversity pass.")
+    @Option(name: .long, help: "Generate query-specific moments for this keyword or phrase.")
+    var query: String?
+
+    @Flag(name: .long, help: "Include debug candidates before the MMR diversity pass.")
     var explain: Bool = false
 
     mutating func run() async throws {
@@ -64,11 +70,21 @@ struct MomentsCommand: AsyncParsableCommand {
             throw ExitCode(VvxExitCode.userError)
         }
 
-        let ranking = MomentRanker.rank(
-            result: result,
-            config: MomentRankerConfig(limit: limit, includeCandidates: explain)
-        )
-        print(ranking.jsonString())
+        let config = MomentRankerConfig(limit: limit, includeCandidates: explain)
+        if let query, !query.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty {
+            let ranking = MomentRanker.rankQuery(
+                result: result,
+                query: query,
+                config: config
+            )
+            print(ranking.jsonString())
+        } else {
+            let ranking = MomentRanker.rank(
+                result: result,
+                config: config
+            )
+            print(ranking.jsonString())
+        }
     }
 }
 

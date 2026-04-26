@@ -40,6 +40,16 @@ public struct RankedMoment: Codable, Sendable, Equatable {
     public let modeSpecificPenalties: [String]?
     public let sponsorDetected: Bool?
     public let selectedForProduct: Bool?
+    public let queryStrength: String?
+    public let matchedTerms: [String]?
+    public let queryMatchScore: Int?
+    public let queryIntentScore: Int?
+    public let queryIntentSignals: [String]?
+    public let momentQualityScore: Int?
+    public let boundaryQualityScore: Int?
+    public let combinedScore: Int?
+    public let queryScoreBreakdown: QueryMomentScoreBreakdown?
+    public let videoURLAtTime: String?
 
     public init(
         id: String,
@@ -76,7 +86,17 @@ public struct RankedMoment: Codable, Sendable, Equatable {
         modeSpecificBoosts: [String]? = nil,
         modeSpecificPenalties: [String]? = nil,
         sponsorDetected: Bool? = nil,
-        selectedForProduct: Bool? = nil
+        selectedForProduct: Bool? = nil,
+        queryStrength: String? = nil,
+        matchedTerms: [String]? = nil,
+        queryMatchScore: Int? = nil,
+        queryIntentScore: Int? = nil,
+        queryIntentSignals: [String]? = nil,
+        momentQualityScore: Int? = nil,
+        boundaryQualityScore: Int? = nil,
+        combinedScore: Int? = nil,
+        queryScoreBreakdown: QueryMomentScoreBreakdown? = nil,
+        videoURLAtTime: String? = nil
     ) {
         self.id             = id
         self.rank           = rank
@@ -113,6 +133,16 @@ public struct RankedMoment: Codable, Sendable, Equatable {
         self.modeSpecificPenalties = modeSpecificPenalties
         self.sponsorDetected = sponsorDetected
         self.selectedForProduct = selectedForProduct
+        self.queryStrength = queryStrength
+        self.matchedTerms = matchedTerms
+        self.queryMatchScore = queryMatchScore
+        self.queryIntentScore = queryIntentScore
+        self.queryIntentSignals = queryIntentSignals
+        self.momentQualityScore = momentQualityScore
+        self.boundaryQualityScore = boundaryQualityScore
+        self.combinedScore = combinedScore
+        self.queryScoreBreakdown = queryScoreBreakdown
+        self.videoURLAtTime = videoURLAtTime
     }
 }
 
@@ -165,6 +195,37 @@ public struct MomentScoreBreakdown: Codable, Sendable, Equatable {
             qualityPenalty: qualityPenalty,
             mmrDiversity:   value
         )
+    }
+}
+
+public enum QueryMomentStrength: String, Codable, Sendable, Equatable {
+    case strong
+    case medium
+    case weak
+}
+
+public struct QueryMomentScoreBreakdown: Codable, Sendable, Equatable {
+    public let queryMatch: Int
+    public let queryIntent: Int?
+    public let momentQuality: Int
+    public let boundaryQuality: Int
+    public let diversity: Int
+    public let combined: Int
+
+    public init(
+        queryMatch: Int,
+        queryIntent: Int? = nil,
+        momentQuality: Int,
+        boundaryQuality: Int,
+        diversity: Int = 0,
+        combined: Int
+    ) {
+        self.queryMatch = queryMatch
+        self.queryIntent = queryIntent
+        self.momentQuality = momentQuality
+        self.boundaryQuality = boundaryQuality
+        self.diversity = diversity
+        self.combined = combined
     }
 }
 
@@ -258,6 +319,71 @@ public struct RejectedMomentAnchor: Codable, Sendable, Equatable {
     }
 }
 
+public struct RejectedQueryAnchor: Codable, Sendable, Equatable {
+    public let id: String
+    public let startSeconds: Double
+    public let endSeconds: Double
+    public let centerSentence: String
+    public let chapterTitle: String?
+    public let chapterIndex: Int?
+    public let queryMatchScore: Int
+    public let matchedTerms: [String]
+    public let rejectionReason: String
+
+    public init(
+        id: String,
+        startSeconds: Double,
+        endSeconds: Double,
+        centerSentence: String,
+        chapterTitle: String?,
+        chapterIndex: Int?,
+        queryMatchScore: Int,
+        matchedTerms: [String],
+        rejectionReason: String
+    ) {
+        self.id = id
+        self.startSeconds = startSeconds
+        self.endSeconds = endSeconds
+        self.centerSentence = centerSentence
+        self.chapterTitle = chapterTitle
+        self.chapterIndex = chapterIndex
+        self.queryMatchScore = queryMatchScore
+        self.matchedTerms = matchedTerms
+        self.rejectionReason = rejectionReason
+    }
+}
+
+public struct DedupedQueryOverlap: Codable, Sendable, Equatable {
+    public let id: String
+    public let duplicateOf: String
+    public let startSeconds: Double
+    public let endSeconds: Double
+    public let overlapRatio: Double
+    public let similarity: Double
+    public let reason: String
+    public let centerSentence: String
+
+    public init(
+        id: String,
+        duplicateOf: String,
+        startSeconds: Double,
+        endSeconds: Double,
+        overlapRatio: Double,
+        similarity: Double,
+        reason: String,
+        centerSentence: String
+    ) {
+        self.id = id
+        self.duplicateOf = duplicateOf
+        self.startSeconds = startSeconds
+        self.endSeconds = endSeconds
+        self.overlapRatio = overlapRatio
+        self.similarity = similarity
+        self.reason = reason
+        self.centerSentence = centerSentence
+    }
+}
+
 /// Output shape for the dev/eval `vvx moments` command.
 public struct MomentRankingResult: Codable, Sendable, Equatable {
     public let schemaVersion: String
@@ -283,6 +409,57 @@ public struct MomentRankingResult: Codable, Sendable, Equatable {
         self.rankedMoments   = rankedMoments
         self.momentCandidates = momentCandidates
         self.rejectedAnchors = rejectedAnchors
+    }
+
+    public func jsonString() -> String {
+        let encoder = JSONEncoder()
+        encoder.outputFormatting = [.prettyPrinted, .sortedKeys]
+        guard let data = try? encoder.encode(self),
+              let str = String(data: data, encoding: .utf8) else { return "{}" }
+        return str
+    }
+}
+
+/// Output shape for query-specific moments. Public output keeps `rankedMoments`
+/// so UI callers can render the same card list, while debug names the query path.
+public struct QueryMomentRankingResult: Codable, Sendable, Equatable {
+    public let schemaVersion: String
+    public let success: Bool
+    public let mode: String
+    public let sourceTitle: String
+    public let sourceURL: String
+    public let query: String
+    public let queryStrength: QueryMomentStrength?
+    public let noResultReason: String?
+    public let rankedMoments: [RankedMoment]
+    public let queryCandidates: [RankedMoment]?
+    public let rejectedQueryAnchors: [RejectedQueryAnchor]?
+    public let dedupedOverlaps: [DedupedQueryOverlap]?
+
+    public init(
+        schemaVersion: String = "1.0",
+        sourceTitle: String,
+        sourceURL: String,
+        query: String,
+        queryStrength: QueryMomentStrength?,
+        noResultReason: String?,
+        rankedMoments: [RankedMoment],
+        queryCandidates: [RankedMoment]? = nil,
+        rejectedQueryAnchors: [RejectedQueryAnchor]? = nil,
+        dedupedOverlaps: [DedupedQueryOverlap]? = nil
+    ) {
+        self.schemaVersion = schemaVersion
+        self.success = true
+        self.mode = "queryMoments"
+        self.sourceTitle = sourceTitle
+        self.sourceURL = sourceURL
+        self.query = query
+        self.queryStrength = queryStrength
+        self.noResultReason = noResultReason
+        self.rankedMoments = rankedMoments
+        self.queryCandidates = queryCandidates
+        self.rejectedQueryAnchors = rejectedQueryAnchors
+        self.dedupedOverlaps = dedupedOverlaps
     }
 
     public func jsonString() -> String {

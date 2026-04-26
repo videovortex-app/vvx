@@ -121,11 +121,15 @@ vvx sense <url> --moments --moment-limit 10
 Debug/eval path:
 ```
 vvx moments --from-sense result.json --limit 10 --explain
+vvx moments --from-sense result.json --query "local AI" --limit 10 --explain
 ```
 
 `--explain` includes pre-diversity `momentCandidates`, V10 click-worthiness
-calibration fields, and `rejectedAnchors` for gate debugging. Do not model best moments as
-`search`, `gather`, or `clip`; the primitive is `transcript -> ranked moments`.
+calibration fields, and `rejectedAnchors` for gate debugging. With `--query`,
+the command returns query-specific `rankedMoments` plus `queryCandidates`,
+`rejectedQueryAnchors`, and `dedupedOverlaps`. Do not model best moments as
+`search`, `gather`, or `clip`; the primitives are `transcript -> ranked moments`
+and `query + transcript -> query moments`.
 
 ### `--metadata-only` mode
 `transcriptBlocks` is empty but `estimatedTokens` and all chapter token counts are
@@ -164,13 +168,20 @@ yt-dlp.
 ```
 vvx moments --from-sense result.json --limit 10
 vvx moments --from-sense result.json --limit 10 --explain
+vvx moments --from-sense result.json --query "local AI" --limit 10 --explain
 ```
 
 Output includes `rankedMoments`. With `--explain`, output also includes
 pre-diversity `momentCandidates` for score debugging.
 
-This is not search, gather, or clip extraction. It maps one transcript to ranked
-moments.
+With `--query`, `moments` does not filter the global `rankedMoments`; it searches
+the full transcript, builds fresh query-specific windows, then ranks by query
+match, moment quality, boundary quality, and diversity. Query output keeps
+`rankedMoments` for UI compatibility and adds `queryStrength`, `noResultReason`,
+`queryCandidates`, `rejectedQueryAnchors`, and `dedupedOverlaps` for eval.
+
+This is not archive search, gather, or clip extraction. It maps one transcript to
+ranked moments, or one query plus one transcript to query moments.
 
 ## fetch — Download video file to local archive
 
