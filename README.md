@@ -64,6 +64,28 @@ vvx gather "artificial intelligence" --limit 5 -o ~/Desktop/vvx-clips
 
 Use `vvx gather --help` for all flags. Use `vvx doctor` whenever any command fails.
 
+## ✨ Find The Best Moments In A Long Video
+
+VVX can now rank timestamped moments directly from a transcript. This is separate
+from database search: it is local video understanding for one video.
+
+```bash
+# Best global moments: "what matters most in this video?"
+vvx sense "https://youtube.com/watch?v=..." --moments --moment-limit 5
+
+# Query moments: "what matters most about this query in this video?"
+vvx sense "https://youtube.com/watch?v=..." > result.json
+vvx moments --from-sense result.json --query "local AI" --limit 5 --explain
+```
+
+Use global moments when you want the strongest aha moments in the whole video.
+Use query moments when the viewer has intent, such as `pricing`, `Claude Code`,
+`local AI`, or `"software engineers"`.
+
+Query moments do **not** filter the global top moments. VVX searches the full
+transcript, builds fresh query-specific windows, ranks by query relevance plus
+moment quality, dedupes overlaps, and returns clickable timestamps.
+
 ---
 
 ## 📖 Core CLI Commands
@@ -71,7 +93,7 @@ Use `vvx gather --help` for all flags. Use `vvx doctor` whenever any command fai
 | Command | Purpose |
 |--------|---------|
 | `vvx sense <url>` | Extract structured metadata + transcript JSON (no media download by default). Use `--moments` for ranked aha moments. |
-| `vvx moments --from-sense result.json` | Dev/eval path for ranking moments from saved sense JSON. |
+| `vvx moments --from-sense result.json` | Rank global or query-specific moments from saved sense JSON. Use `--query "..."` for intent-based moments. |
 | `vvx sync <url>` | Bulk ingest channel/playlist data into the local `vortex.db`. |
 | `vvx fetch <url>` | Fetch a single video and its sidecars into the vault. |
 | `vvx search "query"` | Sub-second FTS5 search — keyword, structural, proximity, chapter, or NLE export. |
@@ -107,6 +129,28 @@ vvx moments --from-sense result.json --limit 10 --explain
 
 `--explain` includes pre-diversity `momentCandidates`. This is not search,
 gather, or clip extraction; it is the primitive `transcript -> ranked moments`.
+
+### `vvx moments --query` — query-specific moments
+
+Query moments answer a different question:
+
+```text
+Global moments: what matters most in this video?
+Query moments:  what matters most about this query in this video?
+```
+
+```bash
+vvx moments --from-sense result.json --query "local AI" --limit 10 --explain
+vvx moments --from-sense result.json --query "Claude Code Obsidian" --limit 5
+```
+
+Query mode searches the full transcript and generates a fresh candidate pool. It
+does not filter the existing global `rankedMoments`. Results include timestamps,
+matched terms, query strength, scoring breakdowns, and `videoURLAtTime`.
+
+Product UIs should usually show only results where `selectedForProduct` is true,
+typically the top 3-5 moments. Debug output can include weaker matches,
+`queryCandidates`, `rejectedQueryAnchors`, and `dedupedOverlaps`.
 
 ### Repository & binaries
 
@@ -318,6 +362,7 @@ Once configured, the agent discovers all tools automatically.
 
 **Agent notes:**
 - For best moments in one video, call `sense` with `moments: true`; do not use `search`, `gather`, or `clip` as the ranker.
+- For best moments about a user query inside one video, call `moments --query` on a saved `SenseResult`; this creates query-specific moments from the full transcript.
 - `search.outputFormat` is required for keyword mode — use `"rag"` for Markdown with clip commands, or `"json"` for structured chaining.
 - Keep `sync.limit` small (5–20) to stay within MCP client timeouts.
 - `gather` returns a `GatherSummaryLine` as the final NDJSON line; read `manifestPath` from it for downstream use.
