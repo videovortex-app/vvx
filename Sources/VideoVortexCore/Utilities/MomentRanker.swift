@@ -152,6 +152,9 @@ private struct MomentCandidate {
     let productWorthinessSignals: [String]
     let contentMode: ContentMode
     let wouldUserClickScore: Int
+    let clickScoreRaw: Int
+    let scoreCapApplied: Bool
+    let scoreCapReason: String?
     let usefulnessSignals: [String]
     let modeSpecificBoosts: [String]
     let modeSpecificPenalties: [String]
@@ -169,7 +172,6 @@ private struct MomentCandidate {
         extraWhy: [String] = []
     ) -> RankedMoment {
         let finalBreakdown = breakdown.withMMRDiversity(mmrDiversity)
-        let finalScore = min(100, max(0, wouldUserClickScore + (mmrDiversity / 2)))
         return RankedMoment(
             id: "\(idPrefix)\(rank)",
             rank: rank,
@@ -178,7 +180,7 @@ private struct MomentCandidate {
             durationSeconds: roundTime(durationSeconds),
             titleHint: titleHint,
             cleanText: cleanText,
-            score: finalScore,
+            score: wouldUserClickScore,
             candidateType: candidateType,
             confidence: roundConfidence(confidence),
             chapterTitle: chapterTitle,
@@ -197,6 +199,10 @@ private struct MomentCandidate {
             productWorthinessSignals: productWorthinessSignals.isEmpty ? nil : productWorthinessSignals,
             contentMode: contentMode.rawValue,
             wouldUserClickScore: wouldUserClickScore,
+            clickScoreRaw: clickScoreRaw,
+            clickScoreFinal: wouldUserClickScore,
+            scoreCapApplied: scoreCapApplied,
+            scoreCapReason: scoreCapReason,
             usefulnessSignals: usefulnessSignals.isEmpty ? nil : usefulnessSignals,
             modeSpecificBoosts: modeSpecificBoosts.isEmpty ? nil : modeSpecificBoosts,
             modeSpecificPenalties: modeSpecificPenalties.isEmpty ? nil : modeSpecificPenalties,
@@ -240,6 +246,17 @@ private struct AnchorEvaluation {
     let rejectionReason: String?
 }
 
+private struct PayoffAnchor {
+    let text: String
+    let score: Int
+    let breakdown: MomentAnchorBreakdown
+    let topicAlignment: Int
+    let chapterSpecificity: Double
+    let numberIsTopicAligned: Bool
+    let hasConsequenceNearby: Bool
+    let productWorthinessSignals: [String]
+}
+
 private struct CandidateGenerationResult {
     let candidates: [MomentCandidate]
     let rejectedAnchors: [RejectedMomentAnchor]
@@ -255,7 +272,10 @@ private enum ContentMode: String, Sendable, Equatable {
 }
 
 private struct ProductEvaluation {
-    let score: Int
+    let rawScore: Int
+    let finalScore: Int
+    let scoreCapApplied: Bool
+    let scoreCapReason: String?
     let usefulnessSignals: [String]
     let modeSpecificBoosts: [String]
     let modeSpecificPenalties: [String]
@@ -313,11 +333,13 @@ private func evaluateProductQuality(
     concretenessScore: Int,
     insightScore: Int,
     selfContainedScore: Int,
+    anchorScore: Int?,
     chapterTitle: String?,
     startSeconds: Double
 ) -> ProductEvaluation {
     let lower = text.lowercased()
-    let center = (centerSentence ?? text).lowercased()
+    let centerText = centerSentence ?? text
+    let center = centerText.lowercased()
     var score = min(56, max(22, baseScore))
     var usefulness = Set<String>()
     var boosts: [String] = []
@@ -369,15 +391,15 @@ private func evaluateProductQuality(
         boost("actionable_instruction", 7)
     }
 
-    let sponsorDetected = hasSponsorOrShoutout(lower)
+    let sponsorDetected = hasSponsorOrShoutout(text)
     if sponsorDetected {
         penalty("sponsor_or_shoutout", 70)
     }
     if isInterviewerSetup(center) || isInterviewerSetup(String(lower.prefix(240))) {
         penalty("interviewer_setup", 48)
     }
-    if hasPodcastMetaFluff(lower) {
-        penalty("podcast_meta", 45)
+    if hasPodcastMetaFluff(lower) || hasCreatorMetaHook(lower) {
+        penalty("creator_or_podcast_meta", 45)
     }
     if isVagueActionRule(center, concretenessScore: concretenessScore, topicAlignment: topicAlignment) {
         penalty("vague_actionable_rule", 30)
@@ -456,16 +478,34 @@ private func evaluateProductQuality(
         penalty("no_actual_payoff", 22)
     }
 
+    let rawScore = min(100, max(0, score))
+    let cap = clickScoreCap(
+        text: text,
+        centerSentence: centerText,
+        rawScore: rawScore,
+        contentMode: contentMode,
+        usefulnessSignals: usefulness,
+        productSignals: productWorthinessSignals,
+        topicAlignment: topicAlignment,
+        hasConsequenceNearby: hasConsequenceNearby,
+        anchorScore: anchorScore,
+        sponsorDetected: sponsorDetected
+    )
+
     let hardBlocked = sponsorDetected
         || penalties.contains("interviewer_setup")
-        || penalties.contains("podcast_meta")
+        || penalties.contains("creator_or_podcast_meta")
         || penalties.contains("vague_actionable_rule")
         || penalties.contains("caption_or_music_artifact")
-    let finalScore = min(100, max(0, score))
-    let selected = finalScore >= 48 && hasPayoff && !hardBlocked
+    let finalScore = min(rawScore, cap.maxScore)
+    let weakTopicAlignment = topicAlignment == 0 && finalScore < 85
+    let selected = finalScore >= 75 && hasPayoff && !hardBlocked && !weakTopicAlignment
 
     return ProductEvaluation(
-        score: finalScore,
+        rawScore: rawScore,
+        finalScore: finalScore,
+        scoreCapApplied: finalScore < rawScore,
+        scoreCapReason: finalScore < rawScore ? cap.reason : nil,
         usefulnessSignals: Array(usefulness).sorted(),
         modeSpecificBoosts: Array(Set(boosts)).sorted(),
         modeSpecificPenalties: Array(Set(penalties)).sorted(),
@@ -950,7 +990,7 @@ private func anchorEvaluation(
     if wordCount(text) < 6 { anchorQualityPenalty -= 8 }
     if contextBlockLooksPromotional(text) { anchorQualityPenalty -= 35 }
     anchorQualityPenalty += podcastFluffPenalty(lower)
-    if hasSponsorOrShoutout(lower) { anchorQualityPenalty -= 45 }
+    if hasSponsorOrShoutout(text) { anchorQualityPenalty -= 45 }
     if isInterviewerSetup(lower) { anchorQualityPenalty -= 30 }
     if hasPodcastMetaFluff(lower) { anchorQualityPenalty -= 34 }
     if isQuestionAnchor(text) { anchorQualityPenalty -= 20 }
@@ -998,6 +1038,44 @@ private func anchorEvaluation(
         productWorthinessSignals: productWorthinessSignals,
         rejectionReason: rejectionReason
     )
+}
+
+private func bestPayoffAnchor(
+    in text: String,
+    chapterTitle: String?,
+    topicTerms: Set<String>,
+    contentMode: ContentMode
+) -> PayoffAnchor? {
+    sentenceRanges(in: text)
+        .compactMap { range -> PayoffAnchor? in
+            let sentence = finalizeAnchorText(String(text[range]))
+            guard wordCount(sentence) >= 4 else { return nil }
+            let evaluation = anchorEvaluation(
+                text: sentence,
+                chapterTitle: chapterTitle,
+                topicTerms: topicTerms,
+                contentMode: contentMode
+            )
+            guard evaluation.rejectionReason == nil else { return nil }
+            let score = max(0, evaluation.breakdown.score)
+            guard score > 0 else { return nil }
+            return PayoffAnchor(
+                text: capitalizeMomentStart(sentence),
+                score: score,
+                breakdown: evaluation.breakdown,
+                topicAlignment: evaluation.topicAlignment,
+                chapterSpecificity: evaluation.chapterSpecificity,
+                numberIsTopicAligned: evaluation.numberIsTopicAligned,
+                hasConsequenceNearby: evaluation.hasConsequenceNearby,
+                productWorthinessSignals: evaluation.productWorthinessSignals
+            )
+        }
+        .sorted {
+            if $0.score != $1.score { return $0.score > $1.score }
+            if $0.topicAlignment != $1.topicAlignment { return $0.topicAlignment > $1.topicAlignment }
+            return $0.text.count > $1.text.count
+        }
+        .first
 }
 
 private func rejectedAnchor(
@@ -1220,6 +1298,11 @@ private func isRandomAnecdoteAnchor(_ lower: String) -> Bool {
 private func hasDanglingPronounStart(_ text: String) -> Bool {
     let tokens = normalizedTokens(text)
     guard let first = tokens.first else { return false }
+    if first == "this",
+       let second = tokens.dropFirst().first,
+       ["means", "lets", "allows", "creates", "turns"].contains(second) {
+        return false
+    }
     let danglingStarts: Set<String> = ["it", "they", "he", "she", "this", "that", "these", "those", "most"]
     guard danglingStarts.contains(first) else { return false }
 
@@ -1259,8 +1342,10 @@ private func hasActionableInstruction(_ lower: String) -> Bool {
     ) != nil
 }
 
-private func hasSponsorOrShoutout(_ lower: String) -> Bool {
-    containsAny(
+private func hasSponsorOrShoutout(_ text: String) -> Bool {
+    let lower = text.lowercased()
+    if hasNativeAdRead(text) { return true }
+    return containsAny(
         lower,
         [
             "supporting sponsor", "sponsor", "sponsored", "brought to you by",
@@ -1269,9 +1354,28 @@ private func hasSponsorOrShoutout(_ lower: String) -> Bool {
             "box of goodies", "green tea", "ingredients", "dream team", "hubspot",
             "supervibe", "vanta.com", "workos.com", "works.com", "as a listener",
             "try it risk-free", "risk-free for 30 days", "abundant mines",
-            "own your machines", "bitcoin you mine"
+            "own your machines", "bitcoin you mine", "i've partnered with",
+            "link in the", "hit subscribe"
         ]
     )
+}
+
+private func hasNativeAdRead(_ text: String) -> Bool {
+    let lower = text.lowercased()
+    if lower.range(of: #"\bi'?ve partnered with\b"#, options: .regularExpression) != nil { return true }
+    if lower.range(of: #"\bin just \d+ (days|weeks|months),? i('?ve| have) seen\b"#, options: .regularExpression) != nil {
+        return true
+    }
+    if lower.range(of: #"\bthey ran \d+ biomarkers\b"#, options: .regularExpression) != nil { return true }
+
+    let brandPatterns = [
+        #"\b[Tt]he reason,\s+[A-Z][A-Za-z0-9&'\-]{2,}\b"#,
+        #"\b[Cc]heck out\s+[A-Z][A-Za-z0-9&'\-]{2,}\b"#,
+        #"\b[Ll]ink in the\s+(description|show notes|comments)\b"#
+    ]
+    return brandPatterns.contains { pattern in
+        text.range(of: pattern, options: .regularExpression) != nil
+    }
 }
 
 private func isInterviewerSetup(_ lower: String) -> Bool {
@@ -1293,7 +1397,21 @@ private func hasPodcastMetaFluff(_ lower: String) -> Bool {
         [
             "this podcast", "this episode", "my guest", "on the show",
             "thanks for having me", "thanks for coming", "listen to this",
-            "startup ideas podcast", "before we start", "before we get started"
+            "startup ideas podcast", "before we start", "before we get started",
+            "the keynote", "my talk", "the speaker after me", "in this session",
+            "keynote after me", "talk after me", "see the keynote"
+        ]
+    )
+}
+
+private func hasCreatorMetaHook(_ lower: String) -> Bool {
+    containsAny(
+        lower,
+        [
+            "by the end of the episode", "by the end of this video",
+            "by the end of this episode", "let's get into it", "lets get into it",
+            "go to this talk", "hit subscribe", "smash subscribe",
+            "like and subscribe", "before we dive in", "without further ado"
         ]
     )
 }
@@ -1332,6 +1450,14 @@ private func isVagueActionRule(
 
 private func startsWithDanglingHook(_ lower: String) -> Bool {
     let trimmed = lower.trimmingCharacters(in: .whitespacesAndNewlines)
+    if trimmed.hasPrefix("this means ")
+        || trimmed.hasPrefix("this is why ")
+        || trimmed.hasPrefix("this lets ")
+        || trimmed.hasPrefix("this allows ")
+        || trimmed.hasPrefix("this creates ")
+        || trimmed.hasPrefix("this turns ") {
+        return false
+    }
     let prefixes = [
         "he ", "she ", "it ", "they ", "this ", "that ", "these ", "those ",
         "the man who ", "the guy who ", "the person who ", "most "
@@ -1462,6 +1588,182 @@ private func isWeakCenterSentence(
     return false
 }
 
+private struct ClickScoreCap {
+    let maxScore: Int
+    let reason: String?
+}
+
+private func clickScoreCap(
+    text: String,
+    centerSentence: String,
+    rawScore: Int,
+    contentMode: ContentMode,
+    usefulnessSignals: Set<String>,
+    productSignals: [String],
+    topicAlignment: Int,
+    hasConsequenceNearby: Bool,
+    anchorScore: Int?,
+    sponsorDetected: Bool
+) -> ClickScoreCap {
+    var cap = 100
+    var reasons: [String] = []
+
+    func apply(_ maxScore: Int, _ reason: String) {
+        if maxScore < cap { cap = maxScore }
+        reasons.append(reason)
+    }
+
+    let lower = text.lowercased()
+    let center = centerSentence.lowercased()
+    let veryStrongPayoff = usefulnessSignals.contains("explicit_lesson")
+        || usefulnessSignals.contains("clear_consequence") && usefulnessSignals.contains("causal_explanation")
+        || Set(productSignals).contains("topic_aligned_number")
+
+    if center.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty || anchorScore == nil {
+        apply(70, "missingPayoffAnchor")
+    }
+    if centerHasTranscriptArtifact(centerSentence) {
+        apply(68, "transcriptArtifactCenter")
+    }
+    if startsLikelyIncomplete(centerSentence) || hasMalformedPayoffStart(centerSentence) {
+        apply(74, "incompletePayoffCenter")
+    }
+    if isOverlongPayoffCenter(centerSentence) {
+        apply(88, "overlongPayoffCenter")
+    }
+    if isSoftOpinionCenter(center), !veryStrongPayoff {
+        apply(88, "softOpinionCenter")
+    }
+    if let anchorScore, anchorScore < 10 {
+        apply(65, "anchorScoreBelow10")
+    }
+    if topicAlignment == 0, !veryStrongPayoff {
+        apply(70, "topicAlignmentZero")
+    }
+    if !hasConsequenceNearby {
+        apply(75, "noConsequenceNearby")
+    }
+    if isSetupOrMetaCenter(center) || isWeakCenterSentence(center, concretenessScore: 0, topicAlignment: topicAlignment) {
+        apply(60, "setupOrMetaCenter")
+    }
+    if sponsorDetected || hasSponsorOrShoutout(text) {
+        apply(40, "sponsorOrAdVibe")
+    }
+    if hasCreatorMetaHook(lower) || hasPodcastMetaFluff(lower) {
+        apply(55, "creatorOrPodcastMeta")
+    }
+    if containsNarrationArtifact(lower) {
+        apply(45, "captionOrMusicArtifact")
+    }
+    if hasDirtyOpeningSentence(text) {
+        apply(72, "dirtyLeadIn")
+    }
+
+    switch contentMode {
+    case .tutorialHowTo:
+        if isTutorialMeta(lower) || isToolDescriptionWithoutAction(lower) {
+            apply(65, "tutorialMetaOrToolDescription")
+        }
+    case .podcastInterview:
+        if isPodcastBanterOrBio(lower, usefulnessSignals: usefulnessSignals) {
+            apply(65, "podcastBanterOrBio")
+        }
+    case .documentary:
+        if isDocumentarySceneSetting(lower, usefulnessSignals: usefulnessSignals) {
+            apply(65, "documentarySceneSetting")
+        }
+    case .newsRoundup:
+        if isIsolatedNewsFact(lower, usefulnessSignals: usefulnessSignals) {
+            apply(65, "isolatedNewsFact")
+        }
+    case .productExplainer, .unknown:
+        break
+    }
+
+    if rawScore < 90 {
+        cap = min(cap, 89)
+        if rawScore >= 75 { reasons.append("rawScoreBelowMustWatch") }
+    }
+
+    return ClickScoreCap(
+        maxScore: cap,
+        reason: reasons.isEmpty ? nil : Array(Set(reasons)).sorted().joined(separator: ",")
+    )
+}
+
+private func isSetupOrMetaCenter(_ lower: String) -> Bool {
+    containsAny(
+        lower,
+        [
+            "let's get into it", "by the end of", "we're going to", "we are going to",
+            "i want to talk about", "i want to ask", "this episode", "this video",
+            "go to this talk", "you were going to say", "thoughts on this"
+        ]
+    )
+}
+
+private func centerHasTranscriptArtifact(_ centerSentence: String) -> Bool {
+    let lower = centerSentence.lowercased()
+    return containsAny(lower, ["[music]", "[applause]", "[laughter]", "(music)", "\\h", "♪"])
+}
+
+private func hasMalformedPayoffStart(_ centerSentence: String) -> Bool {
+    let trimmed = centerSentence.trimmingCharacters(in: .whitespacesAndNewlines)
+    guard !trimmed.isEmpty else { return true }
+    let stripped = trimmed.trimmingCharacters(in: CharacterSet(charactersIn: "\"'“”‘’ "))
+    let lower = stripped.lowercased()
+
+    if stripped.isEmpty { return true }
+    if lower.hasPrefix("um,")
+        || lower.hasPrefix("uh,")
+        || lower.hasPrefix("yeah,")
+        || lower.hasPrefix("and ")
+        || lower.hasPrefix("but ")
+        || lower.hasPrefix("so ")
+        || lower.hasPrefix("because ") {
+        return true
+    }
+    if stripped.range(of: #"^\d+(?:\.\d+)?\s+(?:as|and|but|because|so|um|uh)\b"#, options: [.regularExpression, .caseInsensitive]) != nil {
+        return true
+    }
+    if let first = stripped.unicodeScalars.first,
+       CharacterSet.lowercaseLetters.contains(first) {
+        return true
+    }
+    if let first = stripped.first,
+       ["-", ",", ";", ":", ")", "]"].contains(first) {
+        return true
+    }
+    return false
+}
+
+private func isOverlongPayoffCenter(_ centerSentence: String) -> Bool {
+    wordCount(centerSentence) > 36
+}
+
+private func isSoftOpinionCenter(_ lower: String) -> Bool {
+    let trimmed = lower.trimmingCharacters(in: .whitespacesAndNewlines)
+    return trimmed.hasPrefix("i think ")
+        || trimmed.hasPrefix("i just think ")
+        || trimmed.hasPrefix("i mean ")
+        || trimmed.hasPrefix("i would ")
+        || trimmed.hasPrefix("i'm not saying ")
+        || trimmed.hasPrefix("im not saying ")
+}
+
+private func isPodcastBanterOrBio(_ lower: String, usefulnessSignals: Set<String>) -> Bool {
+    guard usefulnessSignals.isDisjoint(with: ["explicit_lesson", "decision_or_tradeoff", "clear_consequence"]) else {
+        return false
+    }
+    return containsAny(
+        lower,
+        [
+            "fun hang", "shockingly fun", "great guy", "great guest", "my friend",
+            "i first met", "grew up", "went to college", "biography", "backstory"
+        ]
+    )
+}
+
 private func hasActualPayoff(
     usefulnessSignals: Set<String>,
     lower: String,
@@ -1523,9 +1825,9 @@ private func anchorRejectionReason(
     productWorthinessSignals: [String]
 ) -> String? {
     let lower = text.lowercased()
-    if hasSponsorOrShoutout(lower) { return "sponsor_or_cta" }
+    if hasSponsorOrShoutout(text) { return "sponsor_or_cta" }
     if isInterviewerSetup(lower) { return "interviewer_setup" }
-    if hasPodcastMetaFluff(lower) { return "podcast_or_admin_fluff" }
+    if hasPodcastMetaFluff(lower) || hasCreatorMetaHook(lower) { return "podcast_or_admin_fluff" }
     if contextBlockLooksPromotional(text) { return "sponsor_or_cta" }
     if isQuestionAnchor(text) { return "question_anchor" }
     if endsWithDanglingPhrase(text) { return "incomplete_fragment" }
@@ -1672,7 +1974,14 @@ private func makeAnchorCandidate(
     let endIndex = min(units.count - 1, range.upperBound)
     guard startIndex <= endIndex else { return nil }
 
-    let windowUnits = Array(units[startIndex ... endIndex])
+    var windowUnits = trimPromotionalLeadInUnits(
+        Array(units[startIndex ... endIndex]),
+        anchorIndex: anchor.index
+    )
+    windowUnits = trimDirtyLeadInUnits(
+        windowUnits,
+        anchorIndex: anchor.index
+    )
     guard let first = windowUnits.first, let last = windowUnits.last else { return nil }
 
     let rawText = stitchTextSegments(windowUnits.map(\.text))
@@ -1737,6 +2046,7 @@ private func makeAnchorCandidate(
         concretenessScore: concreteScore,
         insightScore: insightScore,
         selfContainedScore: selfContained,
+        anchorScore: anchor.anchorScore,
         chapterTitle: chapterTitle,
         startSeconds: first.startSeconds
     )
@@ -1783,7 +2093,10 @@ private func makeAnchorCandidate(
         rejectionReason: nil,
         productWorthinessSignals: anchor.productWorthinessSignals,
         contentMode: contentMode,
-        wouldUserClickScore: productEvaluation.score,
+        wouldUserClickScore: productEvaluation.finalScore,
+        clickScoreRaw: productEvaluation.rawScore,
+        scoreCapApplied: productEvaluation.scoreCapApplied,
+        scoreCapReason: productEvaluation.scoreCapReason,
         usefulnessSignals: productEvaluation.usefulnessSignals,
         modeSpecificBoosts: productEvaluation.modeSpecificBoosts,
         modeSpecificPenalties: productEvaluation.modeSpecificPenalties,
@@ -2223,6 +2536,63 @@ private func blockHasSpeakerChange(_ block: TranscriptBlock) -> Bool {
     block.text.contains(">>")
 }
 
+private func trimDirtyLeadInUnits(
+    _ units: [ImpactUnit],
+    anchorIndex: Int
+) -> [ImpactUnit] {
+    var trimmed = units
+    while trimmed.count > 1,
+          let first = trimmed.first,
+          first.index < anchorIndex,
+          hasDirtyOpeningSentence(first.text) {
+        let remaining = Array(trimmed.dropFirst())
+        guard wordCount(stitchTextSegments(remaining.map(\.text))) >= 16 else { break }
+        trimmed = remaining
+    }
+    return trimmed
+}
+
+private func trimPromotionalLeadInUnits(
+    _ units: [ImpactUnit],
+    anchorIndex: Int
+) -> [ImpactUnit] {
+    guard units.count > 1 else { return units }
+
+    var trimmed = units
+    while let promoIndex = trimmed.firstIndex(where: {
+        $0.index < anchorIndex && (hasSponsorOrShoutout($0.text) || hasCreatorMetaHook($0.text.lowercased()))
+    }) {
+        let nextIndex = promoIndex + 1
+        guard nextIndex < trimmed.count else { break }
+        let remaining = Array(trimmed[nextIndex...])
+        guard remaining.contains(where: { $0.index == anchorIndex }),
+              wordCount(stitchTextSegments(remaining.map(\.text))) >= 16 else {
+            break
+        }
+        trimmed = remaining
+    }
+
+    return trimmed
+}
+
+private func trimDirtyLeadInBlocks(
+    blocks: [TranscriptBlock],
+    range: ClosedRange<Int>
+) -> ClosedRange<Int> {
+    var start = max(0, range.lowerBound)
+    let end = min(blocks.count - 1, range.upperBound)
+    guard start <= end else { return range }
+
+    while start < end,
+          blocks.indices.contains(start),
+          hasDirtyOpeningSentence(blocks[start].text) {
+        let remaining = stitchBlockTexts(Array(blocks[(start + 1) ... end]))
+        guard wordCount(remaining) >= 18 else { break }
+        start += 1
+    }
+    return start ... end
+}
+
 private func compactMaxDuration(_ config: MomentRankerConfig) -> Double {
     if config.targetDurationSeconds < 20.0 { return config.maxDurationSeconds }
     return min(config.maxDurationSeconds, 42.0)
@@ -2268,7 +2638,8 @@ private func makeCandidate(
         config: config
     )
     let snappedRange = refineBoundaryRange(blocks: blocks, range: readableRange, config: compressedBoundaryConfig(config))
-    let windowBlocks = snappedRange.compactMap { blocks.indices.contains($0) ? blocks[$0] : nil }
+    let trimmedRange = trimDirtyLeadInBlocks(blocks: blocks, range: snappedRange)
+    let windowBlocks = trimmedRange.compactMap { blocks.indices.contains($0) ? blocks[$0] : nil }
     guard let first = windowBlocks.first, let last = windowBlocks.last else { return nil }
 
     let rawText = stitchBlockTexts(windowBlocks)
@@ -2340,6 +2711,12 @@ private func makeCandidate(
         hasConsequenceNearby: hasConsequence
     )
     guard !productSignals.isEmpty else { return nil }
+    let payoffAnchor = bestPayoffAnchor(
+        in: text,
+        chapterTitle: chapterTitle,
+        topicTerms: topicTerms,
+        contentMode: contentMode
+    )
 
     let breakdown = MomentScoreBreakdown(
         topicRelevance: topicScore,
@@ -2353,7 +2730,7 @@ private func makeCandidate(
     guard base > 0 else { return nil }
     let productEvaluation = evaluateProductQuality(
         text: text,
-        centerSentence: nil,
+        centerSentence: payoffAnchor?.text,
         contentMode: contentMode,
         baseScore: base,
         productWorthinessSignals: productSignals,
@@ -2363,6 +2740,7 @@ private func makeCandidate(
         concretenessScore: concreteScore,
         insightScore: insightScore,
         selfContainedScore: selfContained,
+        anchorScore: payoffAnchor?.score,
         chapterTitle: chapterTitle,
         startSeconds: first.startSeconds
     )
@@ -2395,18 +2773,21 @@ private func makeCandidate(
         breakdown: breakdown,
         keywords: keywords,
         why: why,
-        centerSentence: nil,
-        anchorScore: nil,
-        anchorBreakdown: nil,
-        topicAlignment: topicScore,
-        chapterSpecificity: specificity,
-        numberIsTopicAligned: hasNumber ? numberAligned : nil,
-        hasConsequenceNearby: hasConsequence,
+        centerSentence: payoffAnchor?.text,
+        anchorScore: payoffAnchor?.score,
+        anchorBreakdown: payoffAnchor?.breakdown,
+        topicAlignment: payoffAnchor?.topicAlignment ?? topicScore,
+        chapterSpecificity: payoffAnchor?.chapterSpecificity ?? specificity,
+        numberIsTopicAligned: payoffAnchor?.numberIsTopicAligned ?? (hasNumber ? numberAligned : nil),
+        hasConsequenceNearby: payoffAnchor?.hasConsequenceNearby ?? hasConsequence,
         anchorRejected: false,
         rejectionReason: nil,
         productWorthinessSignals: productSignals,
         contentMode: contentMode,
-        wouldUserClickScore: productEvaluation.score,
+        wouldUserClickScore: productEvaluation.finalScore,
+        clickScoreRaw: productEvaluation.rawScore,
+        scoreCapApplied: productEvaluation.scoreCapApplied,
+        scoreCapReason: productEvaluation.scoreCapReason,
         usefulnessSignals: productEvaluation.usefulnessSignals,
         modeSpecificBoosts: productEvaluation.modeSpecificBoosts,
         modeSpecificPenalties: productEvaluation.modeSpecificPenalties,
@@ -2609,12 +2990,15 @@ private func rollingTokenOverlap(_ left: String, _ right: String) -> Int {
 
 private func contextBlockLooksPromotional(_ text: String) -> Bool {
     let lower = text.lowercased()
+    if hasNativeAdRead(text) || hasCreatorMetaHook(lower) { return true }
     if hardLeadInScore(String(lower.prefix(700))) >= 16 { return true }
     let phrases = [
         "vanta.com", "workos.com", "works.com", "supporting sponsor",
         "make sure to subscribe", "click the subscribe", "join the new society",
         "promo code", "use code", "learn more at", "try it risk-free",
-        "abundant mines", "own your machines", "bitcoin you mine"
+        "abundant mines", "own your machines", "bitcoin you mine",
+        "by the end of this video", "by the end of the episode",
+        "go to this talk", "hit subscribe"
     ]
     return phrases.contains(where: lower.contains)
 }
@@ -2664,7 +3048,12 @@ private func fillerPenalty(_ text: String) -> Int {
         ("risk-free for 30 days", -24),
         ("abundant mines", -24),
         ("own your machines", -20),
-        ("bitcoin you mine", -20)
+        ("bitcoin you mine", -20),
+        ("by the end of this video", -18),
+        ("by the end of the episode", -18),
+        ("let's get into it", -12),
+        ("go to this talk", -18),
+        ("hit subscribe", -18)
     ]
     let phrasePenalty = weighted.reduce(0) { total, item in
         total + (text.contains(item.0) ? item.1 : 0)
@@ -2682,6 +3071,7 @@ private func isHardRejectedLeadIn(text: String, chapterTitle: String?) -> Bool {
 }
 
 private func hardLeadInScore(_ text: String) -> Int {
+    if hasNativeAdRead(text) { return 24 }
     let weighted: [(String, Int)] = [
         ("supporting sponsor", 18),
         ("sponsored", 18),
@@ -2705,6 +3095,10 @@ private func hardLeadInScore(_ text: String) -> Int {
         ("abundant mines", 18),
         ("own your machines", 14),
         ("bitcoin you mine", 14),
+        ("by the end of this video", 16),
+        ("by the end of the episode", 16),
+        ("go to this talk", 16),
+        ("hit subscribe", 18),
     ]
     var score = weighted.reduce(0) { total, item in
         total + (text.contains(item.0) ? item.1 : 0)
@@ -2813,7 +3207,7 @@ private func selectWithDiversity(
 
     var pool = candidates.filter {
         $0.baseScore >= max(0, qualityThreshold - 12)
-            && $0.productSelectionScore >= 48
+            && $0.productSelectionScore >= 75
             && $0.rejectionReason == nil
             && $0.selectedForProduct
             && !$0.sponsorDetected
@@ -2871,14 +3265,21 @@ private func selectWithDiversity(
 
 private func passesFinalProductGate(_ candidate: MomentCandidate) -> Bool {
     guard candidate.selectedForProduct,
-          candidate.wouldUserClickScore >= 48,
+          candidate.wouldUserClickScore >= 75,
           !candidate.sponsorDetected else {
+        return false
+    }
+    guard candidate.anchorScore != nil,
+          candidate.centerSentence?.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty == false else {
         return false
     }
 
     let usefulnessSignals = Set(candidate.usefulnessSignals)
     let hasNumber = candidate.cleanText.range(of: #"\d"#, options: .regularExpression) != nil
     let topicAlignment = candidate.topicAlignment ?? 0
+    if topicAlignment == 0, candidate.wouldUserClickScore < 85 {
+        return false
+    }
 
     if hasNumber,
        candidate.numberIsTopicAligned == false,
@@ -2982,13 +3383,169 @@ private func finalizeMomentText(_ text: String) -> String {
     cleaned = stripLeadingFiller(cleaned)
     cleaned = normalizeLeadingFalseStarts(cleaned)
     cleaned = snapToCompleteSentences(cleaned)
+    cleaned = trimDirtyOpeningSentence(cleaned)
+    cleaned = trimLeadingPunctuationArtifacts(cleaned)
+    cleaned = dropOrphanedQuoteFragments(cleaned)
     cleaned = dropRepeatedLeadInSentences(cleaned)
     cleaned = trimTrailingFragment(cleaned)
+    cleaned = trimLeadingPunctuationArtifacts(cleaned)
     cleaned = stripLeadingFiller(cleaned)
     cleaned = normalizeLeadingFalseStarts(cleaned)
     cleaned = trimTrailingFiller(cleaned)
     cleaned = collapseRepeatedWords(cleaned)
+    cleaned = trimLeadingPunctuationArtifacts(cleaned)
     return capitalizeMomentStart(cleanTranscript(cleaned))
+}
+
+private func trimDirtyOpeningSentence(_ text: String) -> String {
+    let cleaned = cleanTranscript(text)
+    var sentences = sentenceRanges(in: cleaned)
+        .map { String(cleaned[$0]).trimmingCharacters(in: .whitespacesAndNewlines) }
+        .filter { !$0.isEmpty }
+
+    while sentences.count > 1, let first = sentences.first {
+        guard isDirtyLeadInSentence(first) || startsLikelyIncomplete(first) else { break }
+
+        let remainder = sentences.dropFirst().joined(separator: " ")
+        guard wordCount(remainder) >= 18 else { break }
+        sentences.removeFirst()
+    }
+
+    return cleanTranscript(sentences.joined(separator: " "))
+}
+
+private func trimLeadingPunctuationArtifacts(_ text: String) -> String {
+    var cleaned = cleanTranscript(text)
+    let pattern = #"^[\s"'“”‘’.,;:\-–—\]\)]+(?=[A-Za-z0-9])"#
+    for _ in 0 ..< 3 {
+        let next = cleaned.replacingOccurrences(
+            of: pattern,
+            with: "",
+            options: .regularExpression
+        )
+        if next == cleaned { break }
+        cleaned = cleanTranscript(next)
+    }
+    return cleaned
+}
+
+private func dropOrphanedQuoteFragments(_ text: String) -> String {
+    var sentences = sentenceRanges(in: text)
+        .map { String(text[$0]).trimmingCharacters(in: .whitespacesAndNewlines) }
+        .filter { !$0.isEmpty }
+    guard !sentences.isEmpty else { return text }
+
+    var index = 0
+    while index < sentences.count {
+        if isOrphanedQuoteFragment(sentences[index]) {
+            var remaining = sentences
+            remaining.remove(at: index)
+            let candidate = remaining.joined(separator: " ")
+            guard wordCount(candidate) >= 18 else { break }
+            sentences.remove(at: index)
+            continue
+        }
+        index += 1
+    }
+
+    return cleanTranscript(sentences.joined(separator: " "))
+}
+
+private func isOrphanedQuoteFragment(_ sentence: String) -> Bool {
+    let trimmed = sentence.trimmingCharacters(in: .whitespacesAndNewlines)
+    guard let first = trimmed.first, "\"'“”‘’".contains(first) else { return false }
+    let stripped = trimLeadingPunctuationArtifacts(trimmed)
+    let lower = stripped.lowercased()
+    if lower.isEmpty { return true }
+
+    let weakPrefixes = [
+        "is ", "are ", "was ", "were ", "be ", "been ", "being ",
+        "as ", "and ", "but ", "so ", "because ", "even though ",
+        "like ", "that ", "which ", "who ", "what ", "why ", "how "
+    ]
+    if weakPrefixes.contains(where: lower.hasPrefix) { return true }
+
+    if let first = stripped.unicodeScalars.first,
+       CharacterSet.lowercaseLetters.contains(first) {
+        return true
+    }
+
+    return false
+}
+
+private func hasDirtyOpeningSentence(_ text: String) -> Bool {
+    let cleaned = cleanTranscript(text)
+    let sentences = sentenceRanges(in: cleaned)
+        .map { String(cleaned[$0]).trimmingCharacters(in: .whitespacesAndNewlines) }
+        .filter { !$0.isEmpty }
+    guard let first = sentences.first else { return false }
+    return isDirtyLeadInSentence(first)
+}
+
+private func isDirtyLeadInSentence(_ sentence: String) -> Bool {
+    let cleaned = cleanTranscript(sentence)
+    let lower = cleaned.lowercased()
+    let words = wordCount(cleaned)
+
+    if hasCreatorMetaHook(lower) { return true }
+    if startsWithDanglingWindowPronoun(cleaned) { return true }
+    if hasDanglingPronounStart(cleaned) { return true }
+    if isOrphanedQuoteFragment(cleaned) { return true }
+    if containsAny(
+        lower,
+        [
+            "thoughts on this", "you were going to say", "i was just agreeing",
+            "i'm just agreeing", "i agree", "you got to try it", "let's get into it",
+            "go to this talk", "what do you think", "what are your thoughts"
+        ]
+    ) {
+        return true
+    }
+
+    if cleaned.range(
+        of: #"^[A-Z][A-Za-z]{2,16},\s+(thoughts|you were|what do|did you|can you|go ahead)"#,
+        options: .regularExpression
+    ) != nil {
+        return true
+    }
+
+    if words < 8 {
+        let hasPayoffCue = hasConsequenceLanguage(lower)
+            || lower.range(of: #"\d"#, options: .regularExpression) != nil
+            || containsAny(lower, ["the key", "mistake", "turns out", "changed", "because"])
+        return !hasPayoffCue
+    }
+
+    return false
+}
+
+private func startsWithDanglingWindowPronoun(_ sentence: String) -> Bool {
+    let lower = sentence.lowercased().trimmingCharacters(in: .whitespacesAndNewlines)
+    if lower.hasPrefix("this means ")
+        || lower.hasPrefix("this is why ")
+        || lower.hasPrefix("this lets ")
+        || lower.hasPrefix("this allows ")
+        || lower.hasPrefix("this creates ")
+        || lower.hasPrefix("this turns ") {
+        return false
+    }
+
+    let hardDanglingPrefixes = [
+        "it ", "it'", "he ", "she ", "they ", "that ", "these ", "those ",
+        "the man who ", "the guy who ", "the person who "
+    ]
+    if hardDanglingPrefixes.contains(where: lower.hasPrefix) { return true }
+
+    if lower.hasPrefix("this ") {
+        let firstEightWords = lower
+            .split(whereSeparator: \.isWhitespace)
+            .prefix(8)
+            .joined(separator: " ")
+        return firstEightWords.range(of: #"\d"#, options: .regularExpression) == nil
+            && !hasConcreteSubjectCue(firstEightWords)
+    }
+
+    return false
 }
 
 private func snapAfterEarlySpeakerMarker(_ text: String) -> String {

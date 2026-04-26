@@ -92,6 +92,10 @@ vvx <url>                               # shorthand (sense is the default)
       "whySelected": ["contains insight language", "distinct from other selected moments"],
       "contentMode": "podcast/interview",
       "wouldUserClickScore": 84,
+      "clickScoreRaw": 92,
+      "clickScoreFinal": 84,
+      "scoreCapApplied": true,
+      "scoreCapReason": "noConsequenceNearby",
       "usefulnessSignals": ["clear_consequence", "topic_aligned_metric"],
       "modeSpecificBoosts": ["podcast_decision_or_change"],
       "modeSpecificPenalties": [],
@@ -119,8 +123,8 @@ Debug/eval path:
 vvx moments --from-sense result.json --limit 10 --explain
 ```
 
-`--explain` includes pre-diversity `momentCandidates`, V8 click-worthiness
-fields, and `rejectedAnchors` for gate debugging. Do not model best moments as
+`--explain` includes pre-diversity `momentCandidates`, V10 click-worthiness
+calibration fields, and `rejectedAnchors` for gate debugging. Do not model best moments as
 `search`, `gather`, or `clip`; the primitive is `transcript -> ranked moments`.
 
 ### `--metadata-only` mode

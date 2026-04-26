@@ -31,6 +31,10 @@ public struct RankedMoment: Codable, Sendable, Equatable {
     public let productWorthinessSignals: [String]?
     public let contentMode: String?
     public let wouldUserClickScore: Int?
+    public let clickScoreRaw: Int?
+    public let clickScoreFinal: Int?
+    public let scoreCapApplied: Bool?
+    public let scoreCapReason: String?
     public let usefulnessSignals: [String]?
     public let modeSpecificBoosts: [String]?
     public let modeSpecificPenalties: [String]?
@@ -64,6 +68,10 @@ public struct RankedMoment: Codable, Sendable, Equatable {
         productWorthinessSignals: [String]? = nil,
         contentMode: String? = nil,
         wouldUserClickScore: Int? = nil,
+        clickScoreRaw: Int? = nil,
+        clickScoreFinal: Int? = nil,
+        scoreCapApplied: Bool? = nil,
+        scoreCapReason: String? = nil,
         usefulnessSignals: [String]? = nil,
         modeSpecificBoosts: [String]? = nil,
         modeSpecificPenalties: [String]? = nil,
@@ -96,6 +104,10 @@ public struct RankedMoment: Codable, Sendable, Equatable {
         self.productWorthinessSignals = productWorthinessSignals
         self.contentMode = contentMode
         self.wouldUserClickScore = wouldUserClickScore
+        self.clickScoreRaw = clickScoreRaw
+        self.clickScoreFinal = clickScoreFinal
+        self.scoreCapApplied = scoreCapApplied
+        self.scoreCapReason = scoreCapReason
         self.usefulnessSignals = usefulnessSignals
         self.modeSpecificBoosts = modeSpecificBoosts
         self.modeSpecificPenalties = modeSpecificPenalties

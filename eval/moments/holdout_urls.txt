@@ -1,0 +1,13 @@
+# MomentRanker holdout set.
+# Fresh blind videos used to check generalization after V9 calibration.
+https://www.youtube.com/watch?v=lyqk7zxbCKs&pp=ugUHEgVlbi1VUw%3D%3D
+https://www.youtube.com/watch?v=eA9Zf2-qYYM&t=6s&pp=ygUNZ3JlZyBpc2VuYmVyZw%3D%3D
+https://www.youtube.com/watch?v=om-etwwp3Wg&pp=ygUNZ3JlZyBpc2VuYmVyZw%3D%3D
+https://www.youtube.com/watch?v=6MBq1paspVU&pp=ygUNZ3JlZyBpc2VuYmVyZw%3D%3D
+https://www.youtube.com/watch?v=RmnWHz8HD74
+https://www.youtube.com/watch?v=IPmIVj0bpzo
+https://www.youtube.com/watch?v=bNdiBwXbLNw
+https://www.youtube.com/watch?v=Rni7Fz7208c&pp=ugUHEgVlbi1JTg%3D%3D
+https://www.youtube.com/watch?v=om2lIWXLLN4
+https://www.youtube.com/watch?v=pl90LATQlHI
+https://www.youtube.com/watch?v=THAupOYwJTs

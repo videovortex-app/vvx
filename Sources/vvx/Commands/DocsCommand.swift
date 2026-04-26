@@ -231,6 +231,10 @@ private extension DocsCommand {
               "productWorthinessSignals": ["consequence", "topic_aligned_number"],
               "contentMode": "podcast/interview",
               "wouldUserClickScore": 84,
+              "clickScoreRaw": 92,
+              "clickScoreFinal": 84,
+              "scoreCapApplied": true,
+              "scoreCapReason": "noConsequenceNearby",
               "usefulnessSignals": ["clear_consequence", "topic_aligned_metric"],
               "modeSpecificBoosts": ["podcast_decision_or_change"],
               "modeSpecificPenalties": [],
@@ -258,10 +262,10 @@ private extension DocsCommand {
         vvx moments --from-sense result.json --limit 10 --explain
         ```
 
-        `--explain` includes pre-diversity `momentCandidates`, V8
-        click-worthiness fields, and `rejectedAnchors` for gate debugging. Do
-        not model best moments as `search`, `gather`, or `clip`; the primitive
-        is `transcript -> ranked moments`.
+        `--explain` includes pre-diversity `momentCandidates`, V10
+        click-worthiness calibration fields, and `rejectedAnchors` for gate
+        debugging. Do not model best moments as `search`, `gather`, or `clip`;
+        the primitive is `transcript -> ranked moments`.
 
         ### `--metadata-only` mode
         `transcriptBlocks` is empty but `estimatedTokens` and all chapter token counts are
@@ -1562,7 +1566,11 @@ private extension DocsCommand {
                 "rejectionReason": { "type": ["string", "null"] },
                 "productWorthinessSignals": { "type": ["array", "null"], "items": { "type": "string" } },
                 "contentMode": { "type": ["string", "null"], "enum": ["tutorial/how-to", "podcast/interview", "news/roundup", "documentary", "product/explainer", "unknown", null] },
-                "wouldUserClickScore": { "type": ["integer", "null"], "description": "0-100 V8 product click-worthiness score." },
+                "wouldUserClickScore": { "type": ["integer", "null"], "description": "0-100 final product click-worthiness score." },
+                "clickScoreRaw": { "type": ["integer", "null"], "description": "0-100 score before V10 calibration caps." },
+                "clickScoreFinal": { "type": ["integer", "null"], "description": "0-100 score after V10 calibration caps." },
+                "scoreCapApplied": { "type": ["boolean", "null"] },
+                "scoreCapReason": { "type": ["string", "null"] },
                 "usefulnessSignals": { "type": ["array", "null"], "items": { "type": "string" } },
                 "modeSpecificBoosts": { "type": ["array", "null"], "items": { "type": "string" } },
                 "modeSpecificPenalties": { "type": ["array", "null"], "items": { "type": "string" } },
