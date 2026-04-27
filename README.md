@@ -74,6 +74,9 @@ from database search: it is local video understanding for one video.
 vvx sense "https://youtube.com/watch?v=..." --moments --moment-limit 5
 
 # Query moments: "what matters most about this query in this video?"
+vvx sense "https://youtube.com/watch?v=..." --moments --moment-query "local AI" --moment-limit 5
+
+# Debug/eval path:
 vvx sense "https://youtube.com/watch?v=..." > result.json
 vvx moments --from-sense result.json --query "local AI" --limit 5 --explain
 ```
@@ -115,11 +118,14 @@ Moment selection belongs in VVX core. UI clients such as ClawWidget should rende
 
 ```bash
 vvx sense "https://youtube.com/watch?v=..." --moments --moment-limit 10
+vvx sense "https://youtube.com/watch?v=..." --moments --moment-query "local AI" --moment-limit 10
 ```
 
-This attaches a `rankedMoments` array to the normal `SenseResult` JSON. V1 is a
-local deterministic ranker over transcript windows: insight/concreteness,
-self-containedness, quality penalties, and an MMR-style diversity pass.
+This attaches a `rankedMoments` array to the normal `SenseResult` JSON. With
+`--moment-query`, VVX returns query-specific moments from the full transcript.
+Without it, V1 is a local deterministic ranker over transcript windows:
+insight/concreteness, self-containedness, quality penalties, and an MMR-style
+diversity pass.
 
 For debugging and offline eval, run the same ranker against a saved sense payload:
 

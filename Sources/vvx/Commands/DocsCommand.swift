@@ -247,14 +247,16 @@ private extension DocsCommand {
         }
         ```
 
-        `rankedMoments` is present only when `--moments` is requested. Moment
-        selection is a VVX core primitive: clients should render these results
-        instead of ranking transcript sections themselves.
+        `rankedMoments` is present only when `--moments` is requested. Add
+        `--moment-query` to rank moments for a specific query from the full
+        transcript. Moment selection is a VVX core primitive: clients should
+        render these results instead of ranking transcript sections themselves.
 
         ### Moment ranking
         Product path:
         ```
         vvx sense <url> --moments --moment-limit 10
+        vvx sense <url> --moments --moment-query "local AI" --moment-limit 10
         ```
 
         Debug/eval path:
@@ -312,6 +314,7 @@ private extension DocsCommand {
         Product path:
         ```
         vvx sense <url> --moments --moment-limit 10
+        vvx sense <url> --moments --moment-query "local AI" --moment-limit 10
         ```
 
         Debug/eval path:

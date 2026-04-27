@@ -21,6 +21,7 @@ enum SenseTool {
         let metadataOnly = arguments["metadataOnly"] as? Bool ?? false
         let moments      = arguments["moments"]      as? Bool ?? false
         let momentLimit  = arguments["momentLimit"]  as? Int  ?? 4
+        let momentQuery  = arguments["momentQuery"]  as? String
         let startStr     = arguments["start"] as? String
         let endStr       = arguments["end"]   as? String
 
@@ -68,6 +69,15 @@ enum SenseTool {
                 url: url)
             return VvxErrorEnvelope(error: err).jsonString()
         }
+        if let momentQuery,
+           !momentQuery.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty,
+           !moments {
+            let err = VvxError(
+                code: .parseError,
+                message: "momentQuery requires moments=true.",
+                url: url)
+            return VvxErrorEnvelope(error: err).jsonString()
+        }
 
         let isSliced = startStr != nil || endStr != nil
 
@@ -78,6 +88,7 @@ enum SenseTool {
                           metadataOnly: metadataOnly,
                           moments: moments,
                           momentLimit: momentLimit,
+                          momentQuery: momentQuery,
                           isSliced: isSliced,
                           parsedStart: parsedStart,
                           parsedEnd: parsedEnd)
@@ -133,6 +144,7 @@ enum SenseTool {
                       metadataOnly: metadataOnly,
                       moments: moments,
                       momentLimit: momentLimit,
+                      momentQuery: momentQuery,
                       isSliced: isSliced,
                       parsedStart: parsedStart,
                       parsedEnd: parsedEnd)
@@ -155,6 +167,7 @@ enum SenseTool {
         metadataOnly: Bool,
         moments: Bool,
         momentLimit: Int,
+        momentQuery: String?,
         isSliced: Bool,
         parsedStart: Double,
         parsedEnd: Double
@@ -168,7 +181,16 @@ enum SenseTool {
         }
 
         if moments && outputFormat.lowercased() == "json" {
-            let ranked = MomentRanker.rankedMoments(for: outputResult, limit: momentLimit)
+            let ranked: [RankedMoment]
+            if let momentQuery, !momentQuery.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty {
+                ranked = MomentRanker.rankQuery(
+                    result: outputResult,
+                    query: momentQuery,
+                    config: MomentRankerConfig(limit: momentLimit)
+                ).rankedMoments
+            } else {
+                ranked = MomentRanker.rankedMoments(for: outputResult, limit: momentLimit)
+            }
             outputResult = outputResult.withRankedMoments(ranked)
         }
 

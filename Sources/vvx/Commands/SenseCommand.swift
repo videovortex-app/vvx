@@ -21,6 +21,7 @@ struct SenseCommand: AsyncParsableCommand {
           vvx sense "https://youtube.com/watch?v=..." --browser safari
           vvx sense "https://youtube.com/watch?v=..." --no-sponsors
           vvx sense "https://youtube.com/watch?v=..." --moments --moment-limit 10
+          vvx sense "https://youtube.com/watch?v=..." --moments --moment-query "local AI"
         """
     )
 
@@ -59,6 +60,9 @@ struct SenseCommand: AsyncParsableCommand {
 
     @Option(name: .customLong("moment-limit"), help: "Maximum ranked moments to return with --moments. Default: 4.")
     var momentLimit: Int = 4
+
+    @Option(name: .customLong("moment-query"), help: "Generate query-specific ranked moments from the full sensed transcript. Requires --moments.")
+    var momentQuery: String?
 
     @Option(name: .long, help: "Start of transcript slice. Accepts HH:MM:SS, MM:SS, or decimal seconds. Defaults to 0 when omitted. The full transcript is always indexed; only stdout is sliced.")
     var start: String?
@@ -108,6 +112,13 @@ struct SenseCommand: AsyncParsableCommand {
         if momentLimit <= 0 {
             let err = VvxError(code: .parseError,
                                message: "--moment-limit must be > 0.",
+                               url: url)
+            printError(err)
+            throw ExitCode(VvxExitCode.forErrorCode(err.code))
+        }
+        if let momentQuery, !momentQuery.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty, !moments {
+            let err = VvxError(code: .parseError,
+                               message: "--moment-query requires --moments.",
                                url: url)
             printError(err)
             throw ExitCode(VvxExitCode.forErrorCode(err.code))
@@ -208,7 +219,16 @@ struct SenseCommand: AsyncParsableCommand {
 
         if moments && !transcript && !markdown {
             let rankStart = Date()
-            let ranked = MomentRanker.rankedMoments(for: outputResult, limit: momentLimit)
+            let ranked: [RankedMoment]
+            if let momentQuery, !momentQuery.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty {
+                ranked = MomentRanker.rankQuery(
+                    result: outputResult,
+                    query: momentQuery,
+                    config: MomentRankerConfig(limit: momentLimit)
+                ).rankedMoments
+            } else {
+                ranked = MomentRanker.rankedMoments(for: outputResult, limit: momentLimit)
+            }
             CLIOutputFormatter.momentsRanked(
                 count: ranked.count,
                 elapsed: Date().timeIntervalSince(rankStart)
