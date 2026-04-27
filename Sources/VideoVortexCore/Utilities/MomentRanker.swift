@@ -1473,8 +1473,10 @@ private func buildQueryEvidence(
     return QueryEvidence(
         displayTitle: queryDisplayTitle(
             matchSentence: sentence,
+            contextText: contextText,
             parsedQuery: parsedQuery,
-            matchedTerms: matchedTerms
+            matchedTerms: matchedTerms,
+            matchStartSeconds: timingUnit.startSeconds
         ),
         matchSentence: sentence,
         matchStartSeconds: roundTime(timingUnit.startSeconds),
@@ -1514,8 +1516,10 @@ private func bestQueryTimingUnit(
 
 private func queryDisplayTitle(
     matchSentence: String,
+    contextText: String,
     parsedQuery: ParsedMomentQuery,
-    matchedTerms: [String]
+    matchedTerms: [String],
+    matchStartSeconds: Double
 ) -> String {
     let sentence = cleanTranscript(matchSentence)
     if let numericTitle = numericQueryTitle(
@@ -1526,10 +1530,30 @@ private func queryDisplayTitle(
         return numericTitle
     }
 
+    if let entityTitle = entityComparisonTitle(
+        matchSentence: sentence,
+        contextText: contextText
+    ) {
+        return entityTitle
+    }
+
+    if let contextTitle = contextTopicTitle(
+        contextText: contextText,
+        matchSentence: sentence
+    ) {
+        return contextTitle
+    }
+
     let clauses = sentence
         .components(separatedBy: CharacterSet(charactersIn: ",;:"))
         .map(trimQueryTitlePrefix)
-        .filter { wordCount($0) >= 3 }
+        .filter {
+            isTrustworthyQueryTitle(
+                $0,
+                parsedQuery: parsedQuery,
+                matchedTerms: matchedTerms
+            )
+        }
 
     let candidates = clauses.isEmpty ? [trimQueryTitlePrefix(sentence)] : clauses
     let best = candidates.max { lhs, rhs in
@@ -1537,7 +1561,15 @@ private func queryDisplayTitle(
             < queryTitleScore(rhs, parsedQuery: parsedQuery, matchedTerms: matchedTerms)
     } ?? sentence
 
-    return truncateQueryTitle(best)
+    if isTrustworthyQueryTitle(
+        best,
+        parsedQuery: parsedQuery,
+        matchedTerms: matchedTerms
+    ) {
+        return truncateQueryTitle(best)
+    }
+
+    return transcriptMatchTitle(startSeconds: matchStartSeconds)
 }
 
 private func numericQueryTitle(
@@ -1563,30 +1595,35 @@ private func numericQueryTitle(
     }
 
     for pattern in patterns {
-        guard let match = firstRegexMatch(pattern, in: sentence) else { continue }
-        let title = truncateQueryTitle(trimQueryTitleAtStopword(match))
-        guard wordCount(title) >= 3 else { continue }
+        let matches = regexMatches(pattern, in: sentence)
+        for match in matches {
+            let title = truncateQueryTitle(trimQueryTitleAtStopword(match))
+            guard isTrustworthyQueryTitle(
+                title,
+                parsedQuery: parsedQuery,
+                matchedTerms: matchedTerms
+            ) else { continue }
         let titleMatch = evaluateQueryMatch(text: title, chapterTitle: nil, parsedQuery: parsedQuery)
         if titleMatch.score > 0 || title.lowercased().contains("million") {
             return title
+        }
         }
     }
 
     return nil
 }
 
-private func firstRegexMatch(_ pattern: String, in text: String) -> String? {
+private func regexMatches(_ pattern: String, in text: String) -> [String] {
     guard let regex = try? NSRegularExpression(
         pattern: pattern,
         options: [.caseInsensitive]
-    ) else { return nil }
+    ) else { return [] }
 
     let nsRange = NSRange(text.startIndex ..< text.endIndex, in: text)
-    guard let match = regex.firstMatch(in: text, range: nsRange),
-          let range = Range(match.range, in: text) else {
-        return nil
+    return regex.matches(in: text, range: nsRange).compactMap { match in
+        guard let range = Range(match.range, in: text) else { return nil }
+        return String(text[range])
     }
-    return String(text[range])
 }
 
 private func trimQueryTitleAtStopword(_ text: String) -> String {
@@ -1597,6 +1634,101 @@ private func trimQueryTitleAtStopword(_ text: String) -> String {
         return cleanTranscript(text)
     }
     return cleanTranscript(words[..<stopIndex].joined(separator: " "))
+}
+
+private func entityComparisonTitle(matchSentence: String, contextText: String) -> String? {
+    let pattern = #"^([A-Z][A-Za-z0-9-]*(?:\s+[A-Z][A-Za-z0-9-]*){0,2})\b.*?\band\s+([A-Z][A-Za-z0-9-]*(?:\s+[A-Z][A-Za-z0-9-]*){0,2})\s+(?:has|had|have|with|was|is)\b"#
+    guard let entities = firstCapturedGroups(pattern, in: matchSentence),
+          entities.count >= 2,
+          let first = cleanEntityName(entities[0]),
+          let second = cleanEntityName(entities[1]),
+          first != second else {
+        return nil
+    }
+
+    let lowerContext = contextText.lowercased()
+    let descriptor: String
+    if lowerContext.contains("exchange") {
+        descriptor = "exchange counts"
+    } else if lowerContext.contains("distillation") {
+        descriptor = "distillation scale"
+    } else if lowerContext.contains("benchmark") || lowerContext.contains("scale") || lowerContext.contains("comparison") {
+        descriptor = "scale comparison"
+    } else {
+        descriptor = "comparison"
+    }
+
+    return "\(first) and \(second) \(descriptor)"
+}
+
+private func contextTopicTitle(contextText: String, matchSentence: String) -> String? {
+    let normalizedMatch = normalizedSearchPhrase(matchSentence)
+    let candidates = sentenceRanges(in: contextText)
+        .map { cleanTranscript(String(contextText[$0])) }
+        .filter { sentence in
+            let normalized = normalizedSearchPhrase(sentence)
+            return !normalized.isEmpty
+                && normalized != normalizedMatch
+                && wordCount(sentence) >= 5
+                && !isLowTrustContextTitle(sentence)
+        }
+
+    guard let best = candidates.max(by: {
+        contextTitleScore($0) < contextTitleScore($1)
+    }), contextTitleScore(best) >= 18 else {
+        return nil
+    }
+
+    let title = conceptualTitle(from: best)
+    return isLowTrustContextTitle(title) ? nil : truncateQueryTitle(title)
+}
+
+private func contextTitleScore(_ sentence: String) -> Int {
+    let lower = sentence.lowercased()
+    var score = 0
+    if lower.contains("scale") { score += 12 }
+    if lower.contains("distillation") { score += 12 }
+    if lower.contains("benchmark") { score += 10 }
+    if lower.contains("report") { score += 8 }
+    if lower.contains("exchange") { score += 8 }
+    if lower.contains("comparison") || lower.contains("competitor") { score += 6 }
+    score += min(12, namedEntityCount(in: sentence) * 3)
+    if lower.range(of: #"\d"#, options: .regularExpression) != nil { score += 3 }
+    if lower.hasPrefix("all right") || lower.hasPrefix("i just") { score -= 12 }
+    score -= max(0, wordCount(sentence) - 18)
+    return score
+}
+
+private func conceptualTitle(from sentence: String) -> String {
+    let cleaned = trimQueryTitlePrefix(sentence)
+    let patterns = [
+        #"\s+is\s+(?:just|only|about|roughly|around)?\s*[\$0-9]"#,
+        #"\s+are\s+(?:just|only|about|roughly|around)?\s*[\$0-9]"#,
+        #"\s+was\s+(?:just|only|about|roughly|around)?\s*[\$0-9]"#
+    ]
+    for pattern in patterns {
+        guard let regex = try? NSRegularExpression(pattern: pattern, options: [.caseInsensitive]) else {
+            continue
+        }
+        let nsRange = NSRange(cleaned.startIndex ..< cleaned.endIndex, in: cleaned)
+        guard let match = regex.firstMatch(in: cleaned, range: nsRange),
+              let range = Range(match.range, in: cleaned) else {
+            continue
+        }
+        let prefix = cleanTranscript(String(cleaned[..<range.lowerBound]))
+        if wordCount(prefix) >= 4 { return prefix }
+    }
+    return cleaned
+}
+
+private func isLowTrustContextTitle(_ title: String) -> Bool {
+    let lower = title.lowercased()
+    if wordCount(title) < 4 { return true }
+    if lower.hasPrefix("maybe ") || lower.hasPrefix("all right") || lower.hasPrefix("i just") {
+        return true
+    }
+    if hasMalformedNumericTitle(title) { return true }
+    return false
 }
 
 private func queryTitleScore(
@@ -1617,6 +1749,97 @@ private func queryTitleScore(
     }
     score -= max(0, wordCount(title) - 14)
     return score
+}
+
+private func isTrustworthyQueryTitle(
+    _ title: String,
+    parsedQuery: ParsedMomentQuery,
+    matchedTerms: [String]
+) -> Bool {
+    let cleaned = stripTrailingSentencePunctuation(cleanTranscript(title))
+    let words = cleaned.split(whereSeparator: \.isWhitespace).map(String.init)
+    guard words.count >= 4 else { return false }
+    if hasMalformedNumericTitle(cleaned) { return false }
+
+    let queryTerms = Set((matchedTerms.isEmpty ? parsedQuery.terms : matchedTerms).map(stemSearchToken))
+    let lowInfo = Set([
+        "a", "an", "the", "and", "or", "but", "per", "each", "million", "billion",
+        "percent"
+    ])
+
+    var contentCount = 0
+    var hasEntity = false
+    for word in words {
+        let normalized = normalizedToken(word)
+        let stem = stemSearchToken(word)
+        let hasDigit = normalized.range(of: #"\d"#, options: .regularExpression) != nil
+        if word.first?.isUppercase == true, !hasDigit {
+            hasEntity = true
+        }
+        if hasDigit || queryTerms.contains(stem) || lowInfo.contains(stem) || lowInfo.contains(normalized) {
+            continue
+        }
+        contentCount += 1
+    }
+
+    if cleaned.contains("$"), contentCount >= 2 { return true }
+    return hasEntity || contentCount >= 2
+}
+
+private func hasMalformedNumericTitle(_ title: String) -> Bool {
+    let patterns = [
+        #"\b\d+(?:\.\d+)?\s+\d+(?:\.\d+)?\s+(?:million|billion|thousand)\b"#,
+        #"\b(\d+(?:\.\d+)?)\s+\1\s+(?:million|billion|thousand)\b"#
+    ]
+    return patterns.contains { pattern in
+        title.range(of: pattern, options: [.regularExpression, .caseInsensitive]) != nil
+    }
+}
+
+private func firstCapturedGroups(_ pattern: String, in text: String) -> [String]? {
+    guard let regex = try? NSRegularExpression(pattern: pattern, options: [.caseInsensitive]) else {
+        return nil
+    }
+    let nsRange = NSRange(text.startIndex ..< text.endIndex, in: text)
+    guard let match = regex.firstMatch(in: text, range: nsRange), match.numberOfRanges > 1 else {
+        return nil
+    }
+    return (1 ..< match.numberOfRanges).compactMap { index in
+        guard let range = Range(match.range(at: index), in: text) else { return nil }
+        return String(text[range])
+    }
+}
+
+private func cleanEntityName(_ raw: String) -> String? {
+    let name = raw.trimmingCharacters(in: CharacterSet.alphanumerics.inverted.union(.whitespacesAndNewlines))
+    guard !name.isEmpty else { return nil }
+    let blocked = Set(["I", "You", "You're", "This", "That", "All", "Maybe", "Imagine"])
+    if blocked.contains(name) { return nil }
+    return name
+}
+
+private func namedEntityCount(in text: String) -> Int {
+    let blocked = Set(["I", "You", "This", "That", "All", "Maybe", "Imagine"])
+    return text
+        .split(whereSeparator: \.isWhitespace)
+        .map { String($0).trimmingCharacters(in: CharacterSet.alphanumerics.inverted) }
+        .filter { !$0.isEmpty && $0.first?.isUppercase == true && !blocked.contains($0) }
+        .count
+}
+
+private func transcriptMatchTitle(startSeconds: Double) -> String {
+    "Transcript match at \(clockTime(startSeconds))"
+}
+
+private func clockTime(_ seconds: Double) -> String {
+    let total = max(0, Int(seconds.rounded(.down)))
+    let hours = total / 3600
+    let minutes = (total % 3600) / 60
+    let secs = total % 60
+    if hours > 0 {
+        return String(format: "%d:%02d:%02d", hours, minutes, secs)
+    }
+    return String(format: "%d:%02d", minutes, secs)
 }
 
 private func trimQueryTitlePrefix(_ text: String) -> String {

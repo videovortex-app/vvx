@@ -854,6 +854,34 @@ struct MomentRankerTests {
         #expect(first?.videoURLAtTime?.contains("t=1176s") == false)
     }
 
+    @Test("Query evidence rejects malformed numeric titles")
+    func queryEvidenceRejectsMalformedNumericTitles() {
+        let blocks = [
+            block(1, 0, 8, "This is the report from Anthropic about model distillation.", chapterIndex: 0),
+            block(2, 8, 16, "The scale of Deep Seek's distillation attack is just 150,000 exchanges.", chapterIndex: 0),
+            block(3, 16, 24, "Moonshot, the company behind Kimmy, had 3.4 4 million and Miniax has 13 million.", chapterIndex: 0),
+        ]
+        let result = SenseResult(
+            url: "https://example.com/video",
+            title: "Distillation report",
+            transcriptSource: .manual,
+            transcriptBlocks: blocks,
+            estimatedTokens: blocks.map(\.estimatedTokens).reduce(0, +)
+        )
+
+        let query = MomentRanker.rankQuery(
+            result: result,
+            query: "million",
+            config: MomentRankerConfig(limit: 2, includeCandidates: true, minDurationSeconds: 6, targetDurationSeconds: 24, maxDurationSeconds: 40)
+        )
+
+        let evidence = query.rankedMoments.first?.queryEvidence
+        #expect(evidence?.matchSentence.contains("3.4 4 million") == true)
+        #expect(evidence?.displayTitle != "3.4 4 million")
+        #expect(evidence?.displayTitle == "Moonshot and Miniax exchange counts")
+        #expect(evidence?.highlightRanges.count == 2)
+    }
+
     @Test("Query moments return empty result with reason when no query match exists")
     func queryMomentsReturnEmptyForNoMatch() {
         let blocks = [
