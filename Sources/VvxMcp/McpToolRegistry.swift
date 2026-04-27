@@ -71,7 +71,8 @@ final class McpToolRegistry: Sendable {
         (with endTime and estimatedTokens per chapter), transcriptSource, estimatedTokens, \
         and inline transcriptBlocks (timestamped, cleaned, with chapterIndex). \
         Set moments=true to attach VVX-ranked aha moments as rankedMoments; pass \
-        momentQuery to rank the best moments for a specific query from the full transcript. ClawWidget \
+        momentQuery to rank the best moments for a specific query from the full transcript; \
+        query moments include queryEvidence for displayTitle, matchSentence, highlights, and context. ClawWidget \
         and other clients should render these rather than ranking transcript sections themselves. \
         For short videos, transcriptBlocks gives you the full transcript in one call. \
         For long videos: set metadataOnly=true to plan context usage first, then call again \

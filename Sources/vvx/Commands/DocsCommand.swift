@@ -329,6 +329,9 @@ private extension DocsCommand {
         full transcript, builds fresh query-specific windows, and returns
         query-scored `rankedMoments` plus `queryCandidates`,
         `rejectedQueryAnchors`, and `dedupedOverlaps`.
+        Query moments include `queryEvidence`; render its `displayTitle` and
+        `matchSentence` as the card focus, then use `contextText` for expansion
+        and `highlightRanges` for matched-term highlighting.
 
         This is not archive search, gather, or clip extraction. It maps one
         transcript to ranked moments, or one query plus one transcript to query
@@ -1546,6 +1549,30 @@ private extension DocsCommand {
                 "productWorthinessSignals": { "type": "array", "items": { "type": "string" } }
               }
             },
+            "QueryHighlightRange": {
+              "type": "object",
+              "required": ["start", "end", "term"],
+              "properties": {
+                "start": { "type": "integer", "description": "Character offset into queryEvidence.matchSentence." },
+                "end":   { "type": "integer", "description": "Exclusive character offset into queryEvidence.matchSentence." },
+                "term":  { "type": "string" }
+              }
+            },
+            "QueryEvidence": {
+              "type": "object",
+              "required": ["displayTitle", "matchSentence", "matchStartSeconds", "matchEndSeconds", "matchedTerms", "highlightRanges", "contextText", "queryMatchScore"],
+              "properties": {
+                "displayTitle":      { "type": "string", "description": "Query-focused card title; prefer over titleHint for query moments." },
+                "matchSentence":     { "type": "string", "description": "Sentence/span that justified the query match; use as collapsed description." },
+                "matchStartSeconds": { "type": "number" },
+                "matchEndSeconds":   { "type": "number" },
+                "matchedTerms":      { "type": "array", "items": { "type": "string" } },
+                "highlightRanges":   { "type": "array", "items": { "$ref": "#/definitions/QueryHighlightRange" } },
+                "contextText":       { "type": "string", "description": "Surrounding moment window; use for expanded context." },
+                "urlAtMatch":        { "type": ["string", "null"], "description": "Source URL timestamped to matchStartSeconds." },
+                "queryMatchScore":   { "type": "integer" }
+              }
+            },
             "RankedMoment": {
               "type": "object",
               "required": ["id", "rank", "startSeconds", "endSeconds", "durationSeconds", "titleHint", "cleanText", "score", "candidateType", "confidence", "scoreBreakdown", "whySelected"],
@@ -1584,7 +1611,8 @@ private extension DocsCommand {
                 "modeSpecificBoosts": { "type": ["array", "null"], "items": { "type": "string" } },
                 "modeSpecificPenalties": { "type": ["array", "null"], "items": { "type": "string" } },
                 "sponsorDetected": { "type": ["boolean", "null"] },
-                "selectedForProduct": { "type": ["boolean", "null"] }
+                "selectedForProduct": { "type": ["boolean", "null"] },
+                "queryEvidence": { "anyOf": [{ "$ref": "#/definitions/QueryEvidence" }, { "type": "null" }] }
               }
             },
             "SenseResult": {

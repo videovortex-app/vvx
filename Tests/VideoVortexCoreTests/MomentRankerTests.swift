@@ -813,7 +813,45 @@ struct MomentRankerTests {
         #expect(query.rankedMoments.first?.matchedTerms?.contains("ai") == true)
         #expect((query.rankedMoments.first?.queryMatchScore ?? 0) >= 70)
         #expect(query.rankedMoments.first?.videoURLAtTime?.contains("t=120s") == true)
+        #expect(query.rankedMoments.first?.queryEvidence?.matchSentence.contains("Local AI matters") == true)
+        #expect(query.rankedMoments.first?.queryEvidence?.highlightRanges.isEmpty == false)
+        #expect(global.first?.queryEvidence == nil)
         #expect(query.queryCandidates?.isEmpty == false)
+    }
+
+    @Test("Query evidence makes late matched sentence the display focus")
+    func queryEvidenceUsesMatchedSentenceInsteadOfContextPrefix() {
+        let blocks = [
+            block(1, 0, 8, "Imagine you are a CEO choosing between models for a customer support app.", chapterIndex: 0),
+            block(2, 8, 16, "GPT 5.5 is $30 per million output tokens because teams pay for every generated answer.", chapterIndex: 0),
+            block(3, 16, 24, "This matters because a million token run becomes real spend when agents loop all day.", chapterIndex: 0),
+        ]
+        let result = SenseResult(
+            url: "https://www.youtube.com/watch?v=price&t=1176s",
+            title: "Model pricing comparison",
+            transcriptSource: .manual,
+            transcriptBlocks: blocks,
+            estimatedTokens: blocks.map(\.estimatedTokens).reduce(0, +)
+        )
+
+        let query = MomentRanker.rankQuery(
+            result: result,
+            query: "million",
+            config: MomentRankerConfig(limit: 2, includeCandidates: true, minDurationSeconds: 6, targetDurationSeconds: 24, maxDurationSeconds: 40)
+        )
+
+        let first = query.rankedMoments.first
+        #expect(first?.selectedForProduct == true)
+        #expect(first?.cleanText.hasPrefix("Imagine you are a CEO") == true)
+        #expect(first?.queryEvidence?.matchSentence.contains("million") == true)
+        #expect(first?.queryEvidence?.matchSentence.hasPrefix("Imagine you are a CEO") == false)
+        #expect(first?.queryEvidence?.displayTitle == "$30 per million output tokens")
+        #expect(first?.queryEvidence?.matchedTerms == ["million"])
+        #expect(first?.queryEvidence?.highlightRanges.contains(where: { $0.term == "million" }) == true)
+        #expect((first?.queryEvidence?.matchStartSeconds ?? 0) >= 8)
+        #expect(first?.queryEvidence?.urlAtMatch?.contains("t=1176s") == false)
+        #expect(first?.queryEvidence?.urlAtMatch?.contains("t=8s") == true)
+        #expect(first?.videoURLAtTime?.contains("t=1176s") == false)
     }
 
     @Test("Query moments return empty result with reason when no query match exists")

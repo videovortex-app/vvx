@@ -50,6 +50,7 @@ public struct RankedMoment: Codable, Sendable, Equatable {
     public let combinedScore: Int?
     public let queryScoreBreakdown: QueryMomentScoreBreakdown?
     public let videoURLAtTime: String?
+    public let queryEvidence: QueryEvidence?
 
     public init(
         id: String,
@@ -96,7 +97,8 @@ public struct RankedMoment: Codable, Sendable, Equatable {
         boundaryQualityScore: Int? = nil,
         combinedScore: Int? = nil,
         queryScoreBreakdown: QueryMomentScoreBreakdown? = nil,
-        videoURLAtTime: String? = nil
+        videoURLAtTime: String? = nil,
+        queryEvidence: QueryEvidence? = nil
     ) {
         self.id             = id
         self.rank           = rank
@@ -143,6 +145,7 @@ public struct RankedMoment: Codable, Sendable, Equatable {
         self.combinedScore = combinedScore
         self.queryScoreBreakdown = queryScoreBreakdown
         self.videoURLAtTime = videoURLAtTime
+        self.queryEvidence = queryEvidence
     }
 }
 
@@ -202,6 +205,58 @@ public enum QueryMomentStrength: String, Codable, Sendable, Equatable {
     case strong
     case medium
     case weak
+}
+
+/// Query-first display contract for single-video search moments.
+///
+/// `cleanText` remains the surrounding context window; this shape identifies the
+/// specific sentence/span that justified the query match so clients can make the
+/// match sentence the visual focus.
+public struct QueryEvidence: Codable, Sendable, Equatable {
+    public let displayTitle: String
+    public let matchSentence: String
+    public let matchStartSeconds: Double
+    public let matchEndSeconds: Double
+    public let matchedTerms: [String]
+    public let highlightRanges: [QueryHighlightRange]
+    public let contextText: String
+    public let urlAtMatch: String?
+    public let queryMatchScore: Int
+
+    public init(
+        displayTitle: String,
+        matchSentence: String,
+        matchStartSeconds: Double,
+        matchEndSeconds: Double,
+        matchedTerms: [String],
+        highlightRanges: [QueryHighlightRange],
+        contextText: String,
+        urlAtMatch: String?,
+        queryMatchScore: Int
+    ) {
+        self.displayTitle = displayTitle
+        self.matchSentence = matchSentence
+        self.matchStartSeconds = matchStartSeconds
+        self.matchEndSeconds = matchEndSeconds
+        self.matchedTerms = matchedTerms
+        self.highlightRanges = highlightRanges
+        self.contextText = contextText
+        self.urlAtMatch = urlAtMatch
+        self.queryMatchScore = queryMatchScore
+    }
+}
+
+/// Character offsets into `QueryEvidence.matchSentence`.
+public struct QueryHighlightRange: Codable, Sendable, Equatable {
+    public let start: Int
+    public let end: Int
+    public let term: String
+
+    public init(start: Int, end: Int, term: String) {
+        self.start = start
+        self.end = end
+        self.term = term
+    }
 }
 
 public struct QueryMomentScoreBreakdown: Codable, Sendable, Equatable {

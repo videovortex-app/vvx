@@ -395,6 +395,7 @@ private struct QueryMomentCandidate {
     let combinedScore: Int
     let queryStrength: QueryMomentStrength
     let videoURLAtTime: String?
+    let queryEvidence: QueryEvidence?
 
     func asMoment(
         rank: Int,
@@ -453,7 +454,7 @@ private struct QueryMomentCandidate {
             modeSpecificBoosts: candidate.modeSpecificBoosts.isEmpty ? nil : candidate.modeSpecificBoosts,
             modeSpecificPenalties: candidate.modeSpecificPenalties.isEmpty ? nil : candidate.modeSpecificPenalties,
             sponsorDetected: candidate.sponsorDetected,
-            selectedForProduct: queryStrength != .weak && finalCombined >= 75 && rank <= 5,
+            selectedForProduct: queryStrength != .weak && finalCombined >= 65 && rank <= 5,
             queryStrength: queryStrength.rawValue,
             matchedTerms: queryMatch.matchedTerms,
             queryMatchScore: queryMatch.score,
@@ -463,7 +464,8 @@ private struct QueryMomentCandidate {
             boundaryQualityScore: boundaryQualityScore,
             combinedScore: finalCombined,
             queryScoreBreakdown: queryBreakdown,
-            videoURLAtTime: videoURLAtTime
+            videoURLAtTime: videoURLAtTime,
+            queryEvidence: queryEvidence
         )
     }
 }
@@ -1347,6 +1349,15 @@ private func makeQueryCandidate(
         selectedForProduct: strength != .weak && combined >= 75
     )
 
+    let evidence = buildQueryEvidence(
+        contextText: text,
+        centerSentence: centerSentence,
+        windowUnits: windowUnits,
+        parsedQuery: parsedQuery,
+        queryMatch: effectiveQueryMatch,
+        sourceURL: sourceURL
+    )
+
     return (
         QueryMomentCandidate(
             candidate: moment,
@@ -1356,7 +1367,8 @@ private func makeQueryCandidate(
             boundaryQualityScore: boundaryQuality,
             combinedScore: combined,
             queryStrength: strength,
-            videoURLAtTime: videoURLAtTime(sourceURL: sourceURL, startSeconds: first.startSeconds)
+            videoURLAtTime: evidence?.urlAtMatch ?? videoURLAtTime(sourceURL: sourceURL, startSeconds: first.startSeconds),
+            queryEvidence: evidence
         ),
         nil
     )
@@ -1423,6 +1435,277 @@ private func bestQueryCenter(
         fallbackEvaluation,
         evaluateQueryMatch(text: fallbackText, chapterTitle: chapterTitle, parsedQuery: parsedQuery)
     )
+}
+
+private func buildQueryEvidence(
+    contextText: String,
+    centerSentence: String,
+    windowUnits: [ImpactUnit],
+    parsedQuery: ParsedMomentQuery,
+    queryMatch: QueryMatchEvaluation,
+    sourceURL: String
+) -> QueryEvidence? {
+    let sentence = cleanTranscript(centerSentence)
+    guard !sentence.isEmpty,
+          let timingUnit = bestQueryTimingUnit(
+            in: windowUnits,
+            centerSentence: sentence,
+            parsedQuery: parsedQuery
+          ) else {
+        return nil
+    }
+
+    let sentenceMatch = evaluateQueryMatch(
+        text: sentence,
+        chapterTitle: nil,
+        parsedQuery: parsedQuery
+    )
+    let evidenceMatch = sentenceMatch.score >= queryMatch.score ? sentenceMatch : queryMatch
+    let matchedTerms = evidenceMatch.matchedTerms.isEmpty
+        ? queryMatch.matchedTerms
+        : evidenceMatch.matchedTerms
+    let highlights = queryHighlightRanges(
+        in: sentence,
+        parsedQuery: parsedQuery,
+        matchedTerms: matchedTerms
+    )
+
+    return QueryEvidence(
+        displayTitle: queryDisplayTitle(
+            matchSentence: sentence,
+            parsedQuery: parsedQuery,
+            matchedTerms: matchedTerms
+        ),
+        matchSentence: sentence,
+        matchStartSeconds: roundTime(timingUnit.startSeconds),
+        matchEndSeconds: roundTime(timingUnit.endSeconds),
+        matchedTerms: matchedTerms,
+        highlightRanges: highlights,
+        contextText: contextText,
+        urlAtMatch: videoURLAtTime(sourceURL: sourceURL, startSeconds: timingUnit.startSeconds),
+        queryMatchScore: evidenceMatch.score
+    )
+}
+
+private func bestQueryTimingUnit(
+    in windowUnits: [ImpactUnit],
+    centerSentence: String,
+    parsedQuery: ParsedMomentQuery
+) -> ImpactUnit? {
+    guard !windowUnits.isEmpty else { return nil }
+
+    let normalizedCenter = normalizedSearchPhrase(centerSentence)
+    if !normalizedCenter.isEmpty {
+        if let containing = windowUnits.first(where: {
+            let unitPhrase = normalizedSearchPhrase($0.text)
+            return unitPhrase.contains(normalizedCenter) || normalizedCenter.contains(unitPhrase)
+        }) {
+            return containing
+        }
+    }
+
+    return windowUnits.max {
+        let lhs = evaluateQueryMatch(text: $0.text, chapterTitle: nil, parsedQuery: parsedQuery)
+        let rhs = evaluateQueryMatch(text: $1.text, chapterTitle: nil, parsedQuery: parsedQuery)
+        if lhs.score != rhs.score { return lhs.score < rhs.score }
+        return $0.startSeconds > $1.startSeconds
+    }
+}
+
+private func queryDisplayTitle(
+    matchSentence: String,
+    parsedQuery: ParsedMomentQuery,
+    matchedTerms: [String]
+) -> String {
+    let sentence = cleanTranscript(matchSentence)
+    if let numericTitle = numericQueryTitle(
+        in: sentence,
+        parsedQuery: parsedQuery,
+        matchedTerms: matchedTerms
+    ) {
+        return numericTitle
+    }
+
+    let clauses = sentence
+        .components(separatedBy: CharacterSet(charactersIn: ",;:"))
+        .map(trimQueryTitlePrefix)
+        .filter { wordCount($0) >= 3 }
+
+    let candidates = clauses.isEmpty ? [trimQueryTitlePrefix(sentence)] : clauses
+    let best = candidates.max { lhs, rhs in
+        queryTitleScore(lhs, parsedQuery: parsedQuery, matchedTerms: matchedTerms)
+            < queryTitleScore(rhs, parsedQuery: parsedQuery, matchedTerms: matchedTerms)
+    } ?? sentence
+
+    return truncateQueryTitle(best)
+}
+
+private func numericQueryTitle(
+    in sentence: String,
+    parsedQuery: ParsedMomentQuery,
+    matchedTerms: [String]
+) -> String? {
+    let terms = matchedTerms.isEmpty ? parsedQuery.terms : matchedTerms
+    let lowerTerms = Set(terms.map { $0.lowercased() })
+    let wantsMillion = lowerTerms.contains("million") || sentence.lowercased().contains("million")
+
+    let patterns: [String]
+    if wantsMillion {
+        patterns = [
+            #"\$[0-9][0-9.,]*(?:\s+(?:per|each|a))?\s+million(?:\s+[A-Za-z][A-Za-z0-9-]*){0,3}"#,
+            #"\b[0-9][0-9.,]*(?:\s+[0-9][0-9.,]*)?\s+million(?:\s+[A-Za-z][A-Za-z0-9-]*){0,3}"#
+        ]
+    } else {
+        patterns = [
+            #"\$[0-9][0-9.,]*(?:\s+[A-Za-z][A-Za-z0-9-]*){0,4}"#,
+            #"\b[0-9][0-9.,]*%?(?:\s+[A-Za-z][A-Za-z0-9-]*){0,4}"#
+        ]
+    }
+
+    for pattern in patterns {
+        guard let match = firstRegexMatch(pattern, in: sentence) else { continue }
+        let title = truncateQueryTitle(trimQueryTitleAtStopword(match))
+        guard wordCount(title) >= 3 else { continue }
+        let titleMatch = evaluateQueryMatch(text: title, chapterTitle: nil, parsedQuery: parsedQuery)
+        if titleMatch.score > 0 || title.lowercased().contains("million") {
+            return title
+        }
+    }
+
+    return nil
+}
+
+private func firstRegexMatch(_ pattern: String, in text: String) -> String? {
+    guard let regex = try? NSRegularExpression(
+        pattern: pattern,
+        options: [.caseInsensitive]
+    ) else { return nil }
+
+    let nsRange = NSRange(text.startIndex ..< text.endIndex, in: text)
+    guard let match = regex.firstMatch(in: text, range: nsRange),
+          let range = Range(match.range, in: text) else {
+        return nil
+    }
+    return String(text[range])
+}
+
+private func trimQueryTitleAtStopword(_ text: String) -> String {
+    let words = text.split(whereSeparator: \.isWhitespace).map(String.init)
+    let stopwords = Set(["and", "but", "because", "when", "if", "that", "which", "so"])
+    guard let stopIndex = words.firstIndex(where: { stopwords.contains(normalizedToken($0)) }),
+          stopIndex >= 3 else {
+        return cleanTranscript(text)
+    }
+    return cleanTranscript(words[..<stopIndex].joined(separator: " "))
+}
+
+private func queryTitleScore(
+    _ title: String,
+    parsedQuery: ParsedMomentQuery,
+    matchedTerms: [String]
+) -> Int {
+    let match = evaluateQueryMatch(text: title, chapterTitle: nil, parsedQuery: parsedQuery)
+    let lower = title.lowercased()
+    var score = match.score * 10
+    if lower.range(of: #"\d"#, options: .regularExpression) != nil { score += 30 }
+    if lower.contains("$") || lower.contains("percent") || lower.contains("million") || lower.contains("billion") {
+        score += 20
+    }
+    let titleTokens = Set(searchTokens(title))
+    for term in matchedTerms {
+        if titleTokens.contains(stemSearchToken(term)) { score += 8 }
+    }
+    score -= max(0, wordCount(title) - 14)
+    return score
+}
+
+private func trimQueryTitlePrefix(_ text: String) -> String {
+    var value = cleanTranscript(text)
+    let prefixes = [
+        "and ", "but ", "so ", "because ", "which means ", "this means ",
+        "that means ", "it means ", "then ", "now "
+    ]
+    var changed = true
+    while changed {
+        changed = false
+        let lower = value.lowercased()
+        for prefix in prefixes where lower.hasPrefix(prefix) {
+            value = String(value.dropFirst(prefix.count))
+                .trimmingCharacters(in: .whitespacesAndNewlines)
+            changed = true
+            break
+        }
+    }
+    return value
+}
+
+private func truncateQueryTitle(_ text: String) -> String {
+    let value = cleanTranscript(text)
+    guard value.count > 110 else {
+        return stripTrailingSentencePunctuation(value)
+    }
+
+    var words: [Substring] = []
+    var count = 0
+    for word in value.split(whereSeparator: \.isWhitespace) {
+        let nextCount = count + word.count + (words.isEmpty ? 0 : 1)
+        if nextCount > 104 { break }
+        words.append(word)
+        count = nextCount
+    }
+    let truncated = words.isEmpty ? String(value.prefix(104)) : words.joined(separator: " ")
+    return stripTrailingSentencePunctuation(truncated) + "..."
+}
+
+private func stripTrailingSentencePunctuation(_ text: String) -> String {
+    text.trimmingCharacters(in: CharacterSet(charactersIn: ".?! "))
+}
+
+private func queryHighlightRanges(
+    in sentence: String,
+    parsedQuery: ParsedMomentQuery,
+    matchedTerms: [String]
+) -> [QueryHighlightRange] {
+    let terms = matchedTerms.isEmpty ? parsedQuery.terms : matchedTerms
+    let termSet = Set(terms)
+    var ranges: [QueryHighlightRange] = []
+
+    var index = sentence.startIndex
+    while index < sentence.endIndex {
+        guard isAlphanumeric(sentence[index]) else {
+            index = sentence.index(after: index)
+            continue
+        }
+
+        let start = index
+        var end = index
+        while end < sentence.endIndex, isAlphanumeric(sentence[end]) {
+            end = sentence.index(after: end)
+        }
+
+        let token = String(sentence[start ..< end])
+        let stemmed = stemSearchToken(token)
+        let matchingTerm = terms.first { term in
+            let variants = parsedQuery.termVariants[term] ?? [term]
+            return variants.contains(stemmed) || variants.contains(normalizedToken(token))
+        }
+
+        if let matchingTerm, termSet.contains(matchingTerm) {
+            ranges.append(QueryHighlightRange(
+                start: sentence.distance(from: sentence.startIndex, to: start),
+                end: sentence.distance(from: sentence.startIndex, to: end),
+                term: matchingTerm
+            ))
+        }
+
+        index = end
+    }
+
+    return ranges
+}
+
+private func isAlphanumeric(_ character: Character) -> Bool {
+    character.unicodeScalars.allSatisfy { CharacterSet.alphanumerics.contains($0) }
 }
 
 private func queryAnchorHardRejection(_ text: String, chapterTitle: String?) -> String? {
@@ -3922,10 +4205,18 @@ private func aggregateQueryStrength(_ moments: [RankedMoment]) -> QueryMomentStr
 private func videoURLAtTime(sourceURL: String, startSeconds: Double) -> String? {
     guard !sourceURL.isEmpty else { return nil }
     let seconds = max(0, Int(startSeconds.rounded(.down)))
-    if sourceURL.contains("?") {
-        return "\(sourceURL)&t=\(seconds)s"
+
+    if var components = URLComponents(string: sourceURL) {
+        let timestampKeys: Set<String> = ["t", "start", "time_continue"]
+        var queryItems = components.queryItems ?? []
+        queryItems.removeAll { timestampKeys.contains($0.name.lowercased()) }
+        queryItems.append(URLQueryItem(name: "t", value: "\(seconds)s"))
+        components.queryItems = queryItems
+        if let value = components.string { return value }
     }
-    return "\(sourceURL)?t=\(seconds)s"
+
+    let separator = sourceURL.contains("?") ? "&" : "?"
+    return "\(sourceURL)\(separator)t=\(seconds)s"
 }
 
 // MARK: - Scoring

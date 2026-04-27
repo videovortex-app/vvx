@@ -152,7 +152,14 @@ vvx moments --from-sense result.json --query "Claude Code Obsidian" --limit 5
 
 Query mode searches the full transcript and generates a fresh candidate pool. It
 does not filter the existing global `rankedMoments`. Results include timestamps,
-matched terms, query strength, scoring breakdowns, and `videoURLAtTime`.
+matched terms, query strength, scoring breakdowns, `videoURLAtTime`, and
+`queryEvidence`.
+
+For query cards, clients should render `queryEvidence.displayTitle` as the
+title and `queryEvidence.matchSentence` as the collapsed description. Use
+`queryEvidence.contextText` only as expanded context, and apply
+`queryEvidence.highlightRanges` inside the match sentence for visible term
+highlights.
 
 Product UIs should usually show only results where `selectedForProduct` is true,
 typically the top 3-5 moments. Debug output can include weaker matches,
